@@ -23,7 +23,8 @@ Os dois requisitos não funcionais do desafio são comprovados por testes automa
 8. [Arquitetura de transição](#arquitetura-de-transição)
 9. [Como executar](#como-executar)
 10. [APIs](#apis)
-11. [Evoluções futuras](#evoluções-futuras)
+11. [CI/CD (proposta)](#cicd-proposta)
+12. [Evoluções futuras](#evoluções-futuras)
 
 ## Domínios e capacidades
 
@@ -385,11 +386,37 @@ docker compose exec daily-balance-consumer node dist/redrive-dead-letters.js --l
 
 O primeiro recalcula o saldo de um dia a partir do diário de movimentos (pode rodar com o consumidor ativo). O segundo devolve à fila as mensagens da DLQ depois de corrigida a causa.
 
+## CI/CD (proposta)
+
+O pipeline não está implementado neste repositório. A proposta, com GitHub Actions e implantação na AWS:
+
+```mermaid
+flowchart LR
+  PR["Pull request"] --> Q["Qualidade<br/>lint, typecheck, testes de unidade"]
+  Q --> I["Integração<br/>Testcontainers"]
+  I --> S["Segurança<br/>npm audit, CodeQL, Trivy"]
+  S --> M["Merge na main"]
+  M --> B["Build das imagens<br/>push no ECR com SBOM"]
+  B --> ST["Deploy em staging<br/>Terraform + ECS"]
+  ST --> E["Testes E2E e smoke de carga<br/>em staging"]
+  E --> A["Aprovação"]
+  A --> P["Deploy canário em produção<br/>rollback automático por SLO"]
+```
+
+| Etapa        | O que acontece                                                                                                                   |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| Pull request | Lint, verificação de tipos, testes de unidade e de integração; análise de vulnerabilidades no código (CodeQL) e nas dependências |
+| Build        | Uma imagem por serviço, com a versão do commit, escaneada com Trivy e publicada no ECR com SBOM                                  |
+| Staging      | Infraestrutura com Terraform, migrations aplicadas na subida, testes E2E e um teste de carga curto contra o ambiente             |
+| Produção     | Deploy canário no ECS (10% e depois 100%), com rollback automático se os alertas de SLO dispararem                               |
+
+As migrations são sempre compatíveis com a versão anterior (_expand/contract_), o que permite deploy sem parada e rollback seguro.
+
 ## Evoluções futuras
 
 - **Mensageria:** adapters SNS + SQS para produção; CDC com Debezium no lugar do polling do outbox; limpeza periódica do outbox e das chaves de idempotência.
 - **Produto:** fechamento de períodos, categorias de lançamento, conciliação bancária, previsão de caixa e integrações com PDV e adquirentes.
-- **Plataforma:** infraestrutura como código (Terraform), deploy canário e rate limiting compartilhado entre réplicas.
+- **Plataforma:** implementação do pipeline de CI/CD descrito acima, infraestrutura como código (Terraform) e rate limiting compartilhado entre réplicas.
 - **Qualidade:** testes de contrato (Pact) para APIs e eventos e experimentos de caos no pipeline.
 
 ## Convenções
