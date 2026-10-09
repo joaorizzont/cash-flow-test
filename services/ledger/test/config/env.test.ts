@@ -8,6 +8,8 @@ describe('loadEnv', () => {
       SERVICE_NAME: 'ledger',
       PORT: 3000,
       LOG_LEVEL: 'info',
+      DEFAULT_TIME_ZONE: 'America/Sao_Paulo',
+      MAX_BACKDATED_DAYS: 30,
     });
   });
 

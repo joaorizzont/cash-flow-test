@@ -1,3 +1,4 @@
+import type { TimeZone } from '../shared/time-zone.js';
 import { ValidationError } from '../shared/validation-error.js';
 
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -20,14 +21,8 @@ export class BusinessDate {
     return new BusinessDate(value);
   }
 
-  static fromInstant(instant: Date, timeZone: string): BusinessDate {
-    const formatter = new Intl.DateTimeFormat('en-CA', {
-      timeZone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    });
-    return BusinessDate.from(formatter.format(instant));
+  static fromInstant(instant: Date, timeZone: TimeZone): BusinessDate {
+    return BusinessDate.from(timeZone.localDateOf(instant));
   }
 
   daysUntil(other: BusinessDate): number {

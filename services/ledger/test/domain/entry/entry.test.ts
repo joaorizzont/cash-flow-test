@@ -4,9 +4,18 @@ import {
   Entry,
   EntryId,
   EntryType,
+  PointOfSaleId,
   ReversalOfReversalError,
 } from '../../../src/domain/index.js';
-import { ENTRY_ID, MERCHANT_ID, NOW, recordedEntry, TODAY } from '../../support/entry-fixtures.js';
+import {
+  ENTRY_ID,
+  MERCHANT_ID,
+  NOW,
+  POINT_OF_SALE_ID,
+  recordedEntry,
+  TODAY,
+} from '../../support/entry-fixtures.js';
+import { NORONHA } from '../../support/time-zones.js';
 
 const REVERSAL_ID = '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
 const REVERSED_AT = new Date('2026-10-10T12:00:00.000Z');
@@ -28,6 +37,7 @@ describe('Entry', () => {
         name: 'EntryRecorded',
         entryId: ENTRY_ID,
         merchantId: MERCHANT_ID,
+        pointOfSaleId: null,
         entryType: EntryType.CREDIT,
         amountInCents: 15_990,
         currency: 'BRL',
@@ -44,14 +54,20 @@ describe('Entry', () => {
     expect(entry.pullDomainEvents()).toEqual([]);
   });
 
-  it('reverses an entry with the opposite type on the same business date', () => {
-    const original = recordedEntry({ type: EntryType.DEBIT });
+  it('reverses an entry keeping its business date, point of sale and time zone', () => {
+    const original = recordedEntry({
+      type: EntryType.DEBIT,
+      pointOfSaleId: PointOfSaleId.from(POINT_OF_SALE_ID),
+      timeZone: NORONHA,
+    });
 
     const reversal = reverse(original);
 
     expect(reversal.type).toBe(EntryType.CREDIT);
     expect(reversal.amount.equals(original.amount)).toBe(true);
     expect(reversal.businessDate.equals(original.businessDate)).toBe(true);
+    expect(reversal.pointOfSaleId?.equals(PointOfSaleId.from(POINT_OF_SALE_ID))).toBe(true);
+    expect(reversal.timeZone.equals(NORONHA)).toBe(true);
     expect(reversal.reversalOf?.value).toBe(ENTRY_ID);
     expect(reversal.recordedAt).toEqual(REVERSED_AT);
     expect(reversal.isReversal()).toBe(true);
@@ -85,12 +101,14 @@ describe('Entry.restore', () => {
     const restored = Entry.restore({
       id: original.id,
       merchantId: original.merchantId,
+      pointOfSaleId: original.pointOfSaleId,
       type: original.type,
       amount: original.amount,
       businessDate: original.businessDate,
       description: original.description,
       reversalOf: EntryId.from(REVERSAL_ID),
       recordedAt: original.recordedAt,
+      timeZone: original.timeZone,
     });
 
     expect(restored.isReversal()).toBe(true);

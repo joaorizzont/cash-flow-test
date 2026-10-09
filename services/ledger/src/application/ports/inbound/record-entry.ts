@@ -2,10 +2,11 @@ import type { EntryView } from './entry-view.js';
 
 export interface RecordEntryCommand {
   readonly merchantId: string;
+  readonly pointOfSaleId?: string;
   readonly type: string;
   readonly amountInCents: number;
   readonly currency?: string;
-  readonly businessDate: string;
+  readonly businessDate?: string;
   readonly description: string;
 }
 

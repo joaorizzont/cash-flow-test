@@ -4,6 +4,7 @@ import type { EntryType } from './entry-type.js';
 interface EntryEventPayload {
   readonly entryId: string;
   readonly merchantId: string;
+  readonly pointOfSaleId: string | null;
   readonly entryType: EntryType;
   readonly amountInCents: number;
   readonly currency: Currency;

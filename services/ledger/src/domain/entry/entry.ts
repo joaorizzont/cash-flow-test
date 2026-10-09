@@ -1,22 +1,26 @@
+import type { PointOfSaleId } from '../point-of-sale/point-of-sale-id.js';
 import { AggregateRoot } from '../shared/aggregate-root.js';
+import type { MerchantId } from '../shared/merchant-id.js';
+import type { TimeZone } from '../shared/time-zone.js';
 import type { BusinessDate } from './business-date.js';
 import type { Description } from './description.js';
 import { ReversalOfReversalError } from './entry-errors.js';
 import type { EntryEvent } from './entry-events.js';
 import type { EntryId } from './entry-id.js';
 import { oppositeOf, type EntryType } from './entry-type.js';
-import type { MerchantId } from './merchant-id.js';
 import type { Money } from './money.js';
 
 export interface EntryProps {
   readonly id: EntryId;
   readonly merchantId: MerchantId;
+  readonly pointOfSaleId: PointOfSaleId | null;
   readonly type: EntryType;
   readonly amount: Money;
   readonly businessDate: BusinessDate;
   readonly description: Description;
   readonly reversalOf: EntryId | null;
   readonly recordedAt: Date;
+  readonly timeZone: TimeZone;
 }
 
 export type NewEntryProps = Omit<EntryProps, 'reversalOf'>;
@@ -49,6 +53,8 @@ export class Entry extends AggregateRoot<EntryEvent> {
     const reversal = new Entry({
       ...props,
       merchantId: this.merchantId,
+      pointOfSaleId: this.pointOfSaleId,
+      timeZone: this.timeZone,
       type: oppositeOf(this.type),
       amount: this.amount,
       businessDate: this.businessDate,
@@ -72,6 +78,10 @@ export class Entry extends AggregateRoot<EntryEvent> {
 
   get merchantId(): MerchantId {
     return this.props.merchantId;
+  }
+
+  get pointOfSaleId(): PointOfSaleId | null {
+    return this.props.pointOfSaleId;
   }
 
   get type(): EntryType {
@@ -98,10 +108,15 @@ export class Entry extends AggregateRoot<EntryEvent> {
     return this.props.recordedAt;
   }
 
+  get timeZone(): TimeZone {
+    return this.props.timeZone;
+  }
+
   private eventPayload() {
     return {
       entryId: this.id.value,
       merchantId: this.merchantId.value,
+      pointOfSaleId: this.pointOfSaleId?.value ?? null,
       entryType: this.type,
       amountInCents: this.amount.cents,
       currency: this.amount.currency,

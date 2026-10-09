@@ -1,5 +1,7 @@
 export * from './errors/entry-already-reversed-error.js';
 export * from './errors/entry-not-found-error.js';
+export * from './errors/point-of-sale-not-found-error.js';
+export * from './ports/inbound/configure-point-of-sale.js';
 export * from './ports/inbound/entry-view.js';
 export * from './ports/inbound/list-entries.js';
 export * from './ports/inbound/record-entry.js';
@@ -8,6 +10,9 @@ export * from './ports/outbound/clock.js';
 export * from './ports/outbound/entry-repository.js';
 export * from './ports/outbound/health-indicator.js';
 export * from './ports/outbound/id-generator.js';
+export * from './ports/outbound/point-of-sale-repository.js';
+export * from './services/time-zone-resolver.js';
+export * from './use-cases/configure-point-of-sale-service.js';
 export * from './use-cases/list-entries-service.js';
 export * from './use-cases/record-entry-service.js';
 export * from './use-cases/reverse-entry-service.js';

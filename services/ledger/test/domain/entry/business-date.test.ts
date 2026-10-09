@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { BusinessDate, ValidationError } from '../../../src/domain/index.js';
-import { SAO_PAULO } from '../../support/fixed-clock.js';
+import { BusinessDate, TimeZone, ValidationError } from '../../../src/domain/index.js';
+import { SAO_PAULO } from '../../support/time-zones.js';
 
 describe('BusinessDate', () => {
   it('accepts a valid ISO calendar date', () => {
@@ -18,7 +18,9 @@ describe('BusinessDate', () => {
     const lateNightInSaoPaulo = new Date('2026-10-09T02:30:00.000Z');
 
     expect(BusinessDate.fromInstant(lateNightInSaoPaulo, SAO_PAULO).value).toBe('2026-10-08');
-    expect(BusinessDate.fromInstant(lateNightInSaoPaulo, 'UTC').value).toBe('2026-10-09');
+    expect(BusinessDate.fromInstant(lateNightInSaoPaulo, TimeZone.from('UTC')).value).toBe(
+      '2026-10-09',
+    );
   });
 
   it('counts days between dates across months', () => {
