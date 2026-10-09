@@ -333,7 +333,7 @@ Para enviar telemetria em desenvolvimento, suba também o `otel-collector`; sem 
 
 ## APIs
 
-Todas as rotas de negócio exigem `Authorization: Bearer <token>`:
+Todas as rotas de negócio exigem `Authorization: Bearer <token>`. Também é possível testar pelo Swagger (`/docs` de cada serviço), que mostra os schemas de cada body. Para obter um token:
 
 ```bash
 TOKEN=$(curl -s http://localhost:8180/realms/cash-flow/protocol/openid-connect/token \
@@ -351,14 +351,59 @@ TOKEN=$(curl -s http://localhost:8180/realms/cash-flow/protocol/openid-connect/t
 | daily-balance | `GET /v1/daily-balances/{data}`    | `balance:read` | Saldo de um dia, com saldos de abertura e fechamento     |
 | daily-balance | `GET /v1/daily-balances?from=&to=` | `balance:read` | Relatório de até 92 dias, dia a dia                      |
 
+Exemplos prontos para cada rota (o token acima é de um operador; o `analista.centro` só consegue as consultas):
+
 ```bash
+POS=3e4d5c6b-7a89-4b0c-9d1e-2f3a4b5c6d7e
+HOJE=$(TZ=America/Sao_Paulo date +%F)
+ONTEM=$(TZ=America/Sao_Paulo date -v-1d +%F 2>/dev/null || TZ=America/Sao_Paulo date -d yesterday +%F)
+
+# Configurar o fuso de um ponto de venda
+curl -X PUT http://localhost:3001/v1/points-of-sale/$POS \
+  -H "authorization: Bearer $TOKEN" -H "content-type: application/json" \
+  -d '{"timeZone":"America/Manaus"}'
+
+# Registrar um crédito (venda) nesse ponto de venda; repetir com a mesma chave devolve a resposta original
+CHAVE=venda-$(date +%s)
+ENTRY_ID=$(curl -s -X POST http://localhost:3001/v1/entries \
+  -H "authorization: Bearer $TOKEN" -H "content-type: application/json" \
+  -H "idempotency-key: $CHAVE" \
+  -d "{\"type\":\"CREDIT\",\"amountInCents\":15990,\"description\":\"Venda 1024\",\"pointOfSaleId\":\"$POS\"}" | jq -r .id)
+
+# Registrar um débito (pagamento), sem ponto de venda
 curl -X POST http://localhost:3001/v1/entries \
   -H "authorization: Bearer $TOKEN" -H "content-type: application/json" \
-  -H "idempotency-key: venda-1024" \
-  -d '{"type":"CREDIT","amountInCents":15990,"description":"Venda 1024"}'
+  -d '{"type":"DEBIT","amountInCents":3000,"description":"Pagamento fornecedor"}'
 
-curl http://localhost:3002/v1/daily-balances/2026-10-09 -H "authorization: Bearer $TOKEN"
+# Registrar um lançamento retroativo (data de competência explícita, até 30 dias atrás)
+curl -X POST http://localhost:3001/v1/entries \
+  -H "authorization: Bearer $TOKEN" -H "content-type: application/json" \
+  -d "{\"type\":\"CREDIT\",\"amountInCents\":10000,\"description\":\"Venda de ontem\",\"businessDate\":\"$ONTEM\"}"
+
+# Estornar a venda (o corpo é opcional)
+curl -X POST http://localhost:3001/v1/entries/$ENTRY_ID/reversal \
+  -H "authorization: Bearer $TOKEN" -H "content-type: application/json" \
+  -d '{"reason":"Venda cancelada pelo cliente"}'
+
+# Consultar um lançamento e listar os do período
+curl http://localhost:3001/v1/entries/$ENTRY_ID -H "authorization: Bearer $TOKEN"
+curl "http://localhost:3001/v1/entries?from=$HOJE&to=$HOJE&page=1&pageSize=50" -H "authorization: Bearer $TOKEN"
+
+# Saldo do dia e relatório do período
+curl http://localhost:3002/v1/daily-balances/$HOJE -H "authorization: Bearer $TOKEN"
+curl "http://localhost:3002/v1/daily-balances?from=$ONTEM&to=$HOJE" -H "authorization: Bearer $TOKEN"
 ```
+
+| Campo do lançamento | Obrigatório | Formato                                               |
+| ------------------- | ----------- | ----------------------------------------------------- |
+| `type`              | Sim         | `CREDIT` ou `DEBIT`                                   |
+| `amountInCents`     | Sim         | Inteiro positivo em centavos (`15990` = R$ 159,90)    |
+| `description`       | Sim         | De 1 a 140 caracteres                                 |
+| `businessDate`      | Não         | `YYYY-MM-DD`; padrão é hoje no fuso do ponto de venda |
+| `pointOfSaleId`     | Não         | UUID de um ponto de venda configurado                 |
+| `currency`          | Não         | Apenas `BRL`                                          |
+
+Resposta do saldo do dia:
 
 ```json
 {
