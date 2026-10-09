@@ -131,13 +131,13 @@ sequenceDiagram
   participant C as consumer
   participant DDB as PostgreSQL consolidado
   U->>L: POST /v1/entries (JWT, Idempotency-Key)
-  L->>LDB: BEGIN; INSERT lançamento; INSERT outbox; COMMIT
+  L->>LDB: transação: INSERT lançamento + INSERT outbox
   L-->>U: 201 Created
   R->>LDB: SELECT pendentes FOR UPDATE SKIP LOCKED
   R->>MQ: publica (publisher confirms)
   R->>LDB: marca como publicado
   MQ->>C: entrega o evento
-  C->>DDB: BEGIN; INSERT no diário (ignora duplicata); UPSERT aditivo do saldo; COMMIT
+  C->>DDB: transação: INSERT no diário (ignora duplicata) + UPSERT aditivo do saldo
   C-->>MQ: ack
 ```
 
