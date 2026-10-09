@@ -117,13 +117,29 @@ npm run dev -w services/daily-balance
 | `npm run format`    | Formata o código com Prettier          |
 | `npm run build`     | Compila os serviços para `dist/`       |
 
+## Regras de negócio do ledger
+
+| Regra               | Descrição                                                                                                                                                                             |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Valor               | Inteiro positivo em centavos (`amountInCents`), evitando erros de arredondamento de ponto flutuante                                                                                   |
+| Moeda               | Apenas `BRL`                                                                                                                                                                          |
+| Tipo                | `CREDIT` ou `DEBIT`                                                                                                                                                                   |
+| Data de competência | Formato `YYYY-MM-DD`, calculada no fuso `America/Sao_Paulo`; não pode ser futura nem anterior a 30 dias                                                                               |
+| Descrição           | Obrigatória, de 1 a 140 caracteres                                                                                                                                                    |
+| Imutabilidade       | Lançamentos nunca são alterados ou excluídos; correções são feitas por estorno                                                                                                        |
+| Estorno             | Gera um lançamento de tipo oposto, mesmo valor e mesma data de competência, referenciando o original; um lançamento só pode ser estornado uma vez e um estorno não pode ser estornado |
+| Isolamento          | Um comerciante só acessa os próprios lançamentos                                                                                                                                      |
+| Consulta            | Por período de até 92 dias, paginada (máximo de 100 itens por página)                                                                                                                 |
+
+Cada lançamento registrado gera um evento de domínio (`EntryRecorded` ou `EntryReversed`), que será persistido no outbox e publicado para o serviço de consolidado.
+
 ## Roteiro de desenvolvimento
 
 | Fase | Entrega                                                                                                                                                                              | Status       |
 | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------ |
 | 0    | **Fundação**: monorepo com workspaces, TypeScript, lint, testes, Dockerfile multi-stage, Docker Compose com a infraestrutura, health checks, README                                  | ✅ Concluída |
-| 1    | **Domínio do ledger**: entidade de lançamento, value objects (dinheiro em centavos, tipo, data de competência), estorno, casos de uso e ports, testes unitários                      | ⏳ Próxima   |
-| 2    | **Adapters do ledger**: API HTTP, repositório PostgreSQL, migrations, idempotência (`Idempotency-Key`), tabela de outbox na mesma transação, testes de integração com Testcontainers | Pendente     |
+| 1    | **Domínio do ledger**: entidade de lançamento, value objects (dinheiro em centavos, tipo, data de competência), estorno, casos de uso e ports, testes unitários                      | ✅ Concluída |
+| 2    | **Adapters do ledger**: API HTTP, repositório PostgreSQL, migrations, idempotência (`Idempotency-Key`), tabela de outbox na mesma transação, testes de integração com Testcontainers | ⏳ Próxima   |
 | 3    | **Publicação de eventos**: contrato versionado dos eventos, outbox relay com `FOR UPDATE SKIP LOCKED`, publisher RabbitMQ, exchange e filas com DLQ                                  | Pendente     |
 | 4    | **Consolidação diária**: domínio do saldo diário, consumidor idempotente por `event_id`, UPSERT aditivo, retentativas e DLQ, reprocessamento de um dia                               | Pendente     |
 | 5    | **API do consolidado**: consulta por dia e por período, saldo acumulado, cache Redis com fallback para o banco e circuit breaker                                                     | Pendente     |
