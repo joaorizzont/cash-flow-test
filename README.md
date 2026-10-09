@@ -146,7 +146,7 @@ sequenceDiagram
 - **Nenhum evento é perdido:** o evento é gravado com o lançamento; o relay só marca como publicado após a confirmação do broker; as filas são duráveis (_quorum queues_).
 - **Nenhum evento é contado duas vezes:** a entrega é _at-least-once_, e o consumidor registra cada evento em um diário (`applied_movements`) com chave pelo id do evento e pelo id do lançamento, na mesma transação da soma.
 - **Falhas no consumo:** falhas transitórias voltam após 10 s por uma fila de espera; mensagens inválidas ou que esgotam 5 tentativas vão para uma DLQ, de onde podem ser devolvidas com um comando.
-- **Leitura:** a consulta do saldo é uma busca por chave primária em dados já somados, com cache Redis de 5 s. Se o banco falhar, a API responde com o último relatório conhecido (`x-cache: STALE`).
+- **Leitura:** a consulta lê linhas já somadas por comerciante e dia (sem somar lançamentos), com cache Redis de 5 s. Se o banco falhar, a API responde com o último relatório conhecido (`x-cache: STALE`).
 
 ### Arquitetura interna: hexagonal
 
@@ -221,15 +221,15 @@ O requisito mais forte é que o registro de lançamentos não pare se o consolid
 
 ## Segurança
 
-| Controle              | Como                                                                                                                                     |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Autenticação          | Keycloak (OIDC). Os serviços validam o JWT localmente com as chaves públicas (JWKS): assinatura RS256, emissor, audiência e expiração    |
-| Isolamento            | O comerciante vem da claim `merchant_id` do token, um atributo que só o administrador altera; não existe parâmetro de comerciante na API |
-| Autorização           | Escopos por rota (`ledger:write`, `ledger:read`, `balance:read`), concedidos pelos papéis `merchant-operator` e `merchant-viewer`        |
-| Proteção contra abuso | Rate limiting por comerciante (ledger: 20 req/s; consolidado: 100 req/s, o dobro do pico), limite de corpo e headers de segurança        |
-| Entrada               | Toda requisição validada por JSON Schema; os value objects validam novamente                                                             |
-| Erros                 | `401`/`403` no padrão Bearer (RFC 6750); erros internos sem detalhes de implementação                                                    |
-| Disponibilidade       | O Keycloak não está no caminho de cada requisição: com tokens já emitidos, uma queda dele não afeta as APIs                              |
+| Controle              | Como                                                                                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Autenticação          | Keycloak (OIDC). Os serviços validam o JWT localmente com as chaves públicas (JWKS): assinatura RS256, emissor, audiência e expiração                   |
+| Isolamento            | O comerciante vem da claim `merchant_id` do token, um atributo que só o administrador altera; não existe parâmetro de comerciante na API                |
+| Autorização           | Escopos por rota (`ledger:write`, `ledger:read`, `balance:read`), concedidos pelos papéis `merchant-operator` e `merchant-viewer`                       |
+| Proteção contra abuso | Rate limiting por comerciante (ledger: 20 req/s; consolidado: 100 req/s, o dobro do pico), limite de corpo e headers de segurança                       |
+| Entrada               | Toda requisição validada por JSON Schema; os value objects validam novamente                                                                            |
+| Erros                 | `401`/`403` no padrão Bearer (RFC 6750); erros internos sem detalhes de implementação                                                                   |
+| Disponibilidade       | O Keycloak não está no caminho de cada requisição: as chaves públicas ficam em cache, então uma queda dele não afeta requisições com tokens já emitidos |
 
 **Em produção:** TLS no gateway, segredos no Secrets Manager, criptografia em repouso (KMS), um usuário de broker por serviço com privilégio mínimo, e o fluxo de login por senha (habilitado apenas para testes locais) desabilitado em favor de Authorization Code com PKCE.
 
@@ -256,13 +256,13 @@ Todos os cenários abaixo foram executados derrubando componentes com o ambiente
 
 Testes automatizados com [k6](https://k6.io), em um MacBook Air M1 com todos os containers na mesma máquina:
 
-| Teste                                                  | Comando                            | Resultado                                                                 |
-| ------------------------------------------------------ | ---------------------------------- | ------------------------------------------------------------------------- |
-| Lançamentos a 10 req/s com o consolidado fora por 30 s | `npm run test:resilience`          | 900 gravados, 0 falhas, 900 de 900 consolidados, totais iguais ao centavo |
-| Pico de 50 req/s por 2 minutos                         | `npm run test:load`                | 6.001 requisições, 0% de falhas, p95 de 6,5 ms                            |
-| Pico com o Redis fora por 30 s                         | `npm run test:resilience:redis`    | 0% de falhas, p95 de 22 ms                                                |
-| Pico com o banco do consolidado fora por 30 s          | `npm run test:resilience:database` | 0% de falhas, p95 de 8,3 ms                                               |
-| Estresse com uma única réplica                         | `RATE=400` no teste de carga       | 0% de falhas a 400 req/s (8× o pico), p95 de 20,9 ms                      |
+| Teste                                                  | Comando                                                              | Resultado                                                                 |
+| ------------------------------------------------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Lançamentos a 10 req/s com o consolidado fora por 30 s | `npm run test:resilience`                                            | 900 gravados, 0 falhas, 900 de 900 consolidados, totais iguais ao centavo |
+| Pico de 50 req/s por 2 minutos                         | `npm run test:load`                                                  | 6.001 requisições, 0% de falhas, p95 de 6,5 ms                            |
+| Pico com o Redis fora por 30 s                         | `npm run test:resilience:redis`                                      | 0% de falhas, p95 de 22 ms                                                |
+| Pico com o banco do consolidado fora por 30 s          | `npm run test:resilience:database`                                   | 0% de falhas, p95 de 8,3 ms                                               |
+| Estresse com uma única réplica                         | `RATE=400` no teste de carga, com o limite de requisições desativado | 0% de falhas a 400 req/s (8× o pico), p95 de 20,9 ms                      |
 
 ## Arquitetura de transição
 
@@ -279,7 +279,7 @@ A idempotência por id do lançamento evita contagem dupla durante a convivênci
 
 ## Como executar
 
-**Pré-requisitos:** Docker com Docker Compose v2. Node.js 22 apenas para desenvolvimento e testes fora do Docker.
+**Pré-requisitos:** Docker com Docker Compose v2. Node.js 22 apenas para desenvolvimento e testes fora do Docker. `jq` para os exemplos de linha de comando.
 
 ```bash
 cp .env.example .env
@@ -330,6 +330,8 @@ npm run dev:relay -w services/ledger
 npm run dev -w services/daily-balance
 npm run dev:consumer -w services/daily-balance
 ```
+
+Para enviar telemetria em desenvolvimento, suba também o `otel-collector`; sem ele, remova as variáveis `OTEL_*` dos arquivos `.env` dos serviços.
 
 ## APIs
 
@@ -411,7 +413,7 @@ flowchart LR
 | Staging      | Infraestrutura com Terraform, migrations aplicadas na subida, testes E2E e um teste de carga curto contra o ambiente             |
 | Produção     | Deploy canário no ECS (10% e depois 100%), com rollback automático se os alertas de SLO dispararem                               |
 
-As migrations são sempre compatíveis com a versão anterior (_expand/contract_), o que permite deploy sem parada e rollback seguro.
+Regra para as migrations: sempre compatíveis com a versão anterior do código (_expand/contract_), o que permite deploy sem parada e rollback seguro. Elas já são aplicadas automaticamente na subida, com lock para que várias réplicas não as executem ao mesmo tempo.
 
 ## Testes E2E (proposta)
 
