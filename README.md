@@ -24,19 +24,59 @@ flowchart LR
 | `ledger`        | Registrar, estornar e consultar lançamentos. Publica eventos via outbox.    | `3001`      |
 | `daily-balance` | Consumir eventos, manter o saldo diário materializado e servir o relatório. | `3002`      |
 
-## Stack
+## Justificativa das decisões de arquitetura e tecnologia
 
-| Camada         | Tecnologia                            | Motivo                                                           |
-| -------------- | ------------------------------------- | ---------------------------------------------------------------- |
-| Runtime        | Node.js 22 LTS + TypeScript           | Tipagem estática, ecossistema maduro, I/O não bloqueante         |
-| HTTP           | Fastify                               | Alto desempenho, validação por schema, logger estruturado (pino) |
-| Configuração   | Zod                                   | Validação das variáveis de ambiente na inicialização             |
-| Banco de dados | PostgreSQL 17 (um por serviço)        | ACID para o ledger, UPSERT aditivo, `SKIP LOCKED` para o outbox  |
-| Mensageria     | RabbitMQ 4                            | Filas duráveis e DLQ; volume não justifica Kafka                 |
-| Cache          | Redis 7                               | Cache de leitura do consolidado                                  |
-| Testes         | Vitest                                | Rápido, compatível com ESM e TypeScript                          |
-| Qualidade      | ESLint (typescript-eslint) + Prettier | Padronização e regras de complexidade                            |
-| Contêineres    | Docker + Docker Compose               | Ambiente local idêntico ao de produção                           |
+### Tipo de arquitetura
+
+**Escolha: microsserviços orientados a eventos, com dois serviços.**
+
+O requisito não funcional mais forte do desafio é que _o serviço de lançamentos não fique indisponível se o consolidado cair_. Isso exige isolamento de falha real: processos, bancos e deploys separados, sem chamada síncrona entre eles. A divisão foi feita apenas onde o requisito exige, em dois serviços alinhados aos dois bounded contexts do domínio, e não em vários serviços pequenos.
+
+| Alternativa         | Por que não foi escolhida                                                                                                                                                              |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Monólito            | Um erro, vazamento de memória ou pico no relatório derrubaria também o registro de lançamentos                                                                                         |
+| Monólito modular    | Resolve bem a separação de domínio, mas compartilha processo, pool de conexões e deploy; continua sem garantir o isolamento de falha exigido. Seria a escolha se não houvesse esse RNF |
+| Serverless (Lambda) | Atende à carga, mas dificulta a execução local exigida no desafio, aumenta o acoplamento ao provedor e sofre com cold start em picos                                                   |
+| Microsserviços      | **Escolhida.** Isolamento de falha e escala independente; o custo operacional extra é compensado por Docker Compose, health checks e observabilidade desde o início                    |
+
+### Padrões arquiteturais
+
+| Padrão                                     | Problema que resolve                                                                                                                                                                                                             |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Comunicação assíncrona por eventos         | O ledger não conhece nem espera o consolidado. Se o consolidado cair, os eventos ficam na fila e são processados quando ele voltar                                                                                               |
+| Transactional Outbox                       | Evita a escrita dupla (banco + broker). O lançamento e o evento são gravados na mesma transação; um relay publica depois. Nem o RabbitMQ fica no caminho crítico do registro                                                     |
+| CQRS com modelo de leitura materializado   | O saldo diário é atualizado a cada evento, não calculado na consulta. A leitura vira uma busca por chave primária com cache, o que torna 50 req/s trivial e mantém a perda de requisições bem abaixo dos 5% tolerados            |
+| Consumidor idempotente                     | A entrega é _at-least-once_. A deduplicação por `event_id` na mesma transação da atualização garante que um evento repetido não altere o saldo duas vezes                                                                        |
+| Arquitetura hexagonal (Ports and Adapters) | Regras de negócio isoladas de framework, banco e mensageria. Casos de uso dependem apenas de interfaces (ports), o que permite testar o domínio sem infraestrutura e trocar adapters (ex.: RabbitMQ por SQS) sem tocar no núcleo |
+| DDD tático                                 | Value objects garantem que nenhum dado inválido exista no domínio (`Money`, `BusinessDate`, `TimeZone`); o agregado `Entry` concentra as regras de estorno e emite os eventos de domínio                                         |
+
+### Tecnologias
+
+| Tecnologia                    | Por que                                                                                                                                                                           | Alternativas consideradas                                                                              |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Node.js 22 LTS                | I/O não bloqueante adequado a APIs e consumidores de fila; versão LTS com suporte de longo prazo                                                                                  | .NET e Java teriam o mesmo desenho; a escolha seguiu o domínio da linguagem                            |
+| TypeScript (modo estrito)     | Tipagem estática para modelar o domínio com segurança e refatorar com confiança                                                                                                   | JavaScript puro, descartado por perder garantias em tempo de compilação                                |
+| Fastify                       | Alto desempenho, validação de entrada por JSON Schema, logger estruturado (pino) nativo e testes sem abrir porta (`inject`)                                                       | Express (mais lento e sem validação nativa), NestJS (mais opinativo e pesado para o escopo)            |
+| Zod                           | Valida variáveis de ambiente na inicialização: o serviço falha rápido se estiver mal configurado                                                                                  | Leitura manual de `process.env`                                                                        |
+| PostgreSQL 17, um por serviço | ACID para o ledger; `CHECK` constraints; `FOR UPDATE SKIP LOCKED` para o outbox com várias instâncias; UPSERT aditivo para o consolidado; bancos separados preservam o isolamento | MongoDB (sem a mesma garantia transacional simples para outbox + entidade)                             |
+| RabbitMQ 4                    | Filas duráveis, DLQ nativa, simples de operar localmente. Na AWS, a mesma abstração é atendida por SNS + SQS                                                                      | Kafka, descartado porque o volume (dezenas de eventos por segundo) não justifica seu custo operacional |
+| Redis 7                       | Cache de leitura do consolidado, reduzindo latência e carga no banco nos picos                                                                                                    | Cache em memória do processo, que não é compartilhado entre réplicas                                   |
+| Vitest                        | Rápido, suporte nativo a ESM e TypeScript, cobertura com V8                                                                                                                       | Jest, que exige configuração adicional para ESM                                                        |
+| ESLint + Prettier             | Padronização automática e regras que reforçam Clean Code: complexidade ciclomática máxima de 8, no máximo 3 parâmetros por função, proibição de comentários inline                | -                                                                                                      |
+| Docker + Docker Compose       | Um único `Dockerfile` multi-stage para os dois serviços; imagem final só com dependências de produção e usuário não-root; ambiente local completo com um comando                  | -                                                                                                      |
+
+### Decisões de domínio
+
+| Decisão                                                   | Justificativa                                                                                                                                                                                                                                       |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Valores em centavos (inteiro)                             | Ponto flutuante não representa valores monetários com exatidão (`0.1 + 0.2 !== 0.3`). Inteiros em centavos eliminam erros de arredondamento                                                                                                         |
+| Lançamentos imutáveis, correção por estorno               | Preserva a trilha de auditoria e permite reconstruir o consolidado a qualquer momento a partir do ledger. O estorno usa a mesma data de competência do original para corrigir o saldo do dia correto                                                |
+| Data de competência separada do instante de registro      | O dia do caixa (`businessDate`) nem sempre coincide com o momento do registro (`recordedAt`): há lançamentos retroativos e diferenças de fuso. O consolidado agrupa pelo dia do caixa                                                               |
+| Fuso horário por ponto de venda                           | O Brasil tem quatro fusos. Com um fuso único, uma venda à 00h30 em Fernando de Noronha (23h30 em Brasília) seria rejeitada como data futura. Cada ponto de venda tem seu fuso local; lançamentos sem ponto de venda usam o fuso padrão configurável |
+| Fusos no padrão IANA, não deslocamentos                   | `America/Manaus` carrega o histórico e as regras de horário de verão; `-04:00` não. Se o horário de verão voltar, basta atualizar a base de fusos do runtime, sem alterar código                                                                    |
+| Instante em UTC + fuso gravado, sem hora local armazenada | A hora local é derivada do instante e do fuso, então armazená-la seria redundante e poderia divergir. Gravar o fuso vigente em cada lançamento garante que mudar a configuração do ponto de venda não reinterprete lançamentos passados             |
+| O consolidado não lida com fusos                          | O evento carrega apenas a data de competência já resolvida. Toda a lógica de fuso fica no ledger, que é onde o lançamento nasce                                                                                                                     |
+| Identificadores UUID                                      | Gerados pela aplicação antes de persistir, o que permite montar o agregado e seus eventos sem depender do banco; não expõem volume de negócio como IDs sequenciais                                                                                  |
 
 ## Arquitetura hexagonal (Ports and Adapters)
 
@@ -129,7 +169,7 @@ npm run dev -w services/daily-balance
 | Data e hora         | O instante do registro é gravado em UTC (`recordedAt`) junto com o fuso vigente no momento (`timeZone`). A hora local (`recordedAtLocal`) é derivada na resposta e não é armazenada, evitando redundância; o fuso gravado garante que mudanças futuras na configuração do ponto de venda não alterem lançamentos passados |
 | Descrição           | Obrigatória, de 1 a 140 caracteres                                                                                                                                                                                                                                                                                        |
 | Imutabilidade       | Lançamentos nunca são alterados ou excluídos; correções são feitas por estorno                                                                                                                                                                                                                                            |
-| Estorno             | Gera um lançamento de tipo oposto, mesmo valor e mesma data de competência, referenciando o original; um lançamento só pode ser estornado uma vez e um estorno não pode ser estornado                                                                                                                                     |
+| Estorno             | Gera um lançamento de tipo oposto, mesmo valor, mesma data de competência, mesmo ponto de venda e mesmo fuso, referenciando o original; um lançamento só pode ser estornado uma vez e um estorno não pode ser estornado                                                                                                   |
 | Isolamento          | Um comerciante só acessa os próprios lançamentos                                                                                                                                                                                                                                                                          |
 | Consulta            | Por período de até 92 dias, paginada (máximo de 100 itens por página)                                                                                                                                                                                                                                                     |
 
@@ -154,6 +194,6 @@ Cada lançamento registrado gera um evento de domínio (`EntryRecorded` ou `Entr
 ## Convenções
 
 - Código, nomes, mensagens de commit e documentação técnica em inglês; o README em português.
-- Código sem comentários: nomes expressivos, funções pequenas e responsabilidade única tornam a intenção explícita. As decisões ficam registradas nos ADRs.
+- Código sem comentários: nomes expressivos, funções pequenas e responsabilidade única tornam a intenção explícita. As decisões ficam registradas na seção de justificativas e nos ADRs.
 - Princípios SOLID e Clean Code, reforçados por regras de lint (complexidade ciclomática, número máximo de parâmetros, imports de tipo).
 - Commits seguindo [Conventional Commits](https://www.conventionalcommits.org/).
