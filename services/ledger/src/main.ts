@@ -1,3 +1,4 @@
+import { pino } from 'pino';
 import { buildHttpServer } from './adapters/inbound/http/server.js';
 import { ledgerMigrations } from './adapters/outbound/postgres/migrations/index.js';
 import { createPool, PostgresDatabase } from './adapters/outbound/postgres/postgres-database.js';
@@ -7,10 +8,12 @@ import { loadApiEnv } from './config/env.js';
 import { createLedgerApi } from './container.js';
 
 const env = loadApiEnv();
+const logger = pino({ level: env.LOG_LEVEL, base: { service: env.SERVICE_NAME } });
 
 const pool = createPool({
   connectionString: env.DATABASE_URL,
   maxConnections: env.DATABASE_POOL_SIZE,
+  onIdleClientError: (error) => logger.warn({ err: error }, 'idle database connection lost'),
 });
 await new PostgresMigrator(pool, ledgerMigrations).migrate();
 const database = new PostgresDatabase(pool);

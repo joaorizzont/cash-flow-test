@@ -16,7 +16,11 @@ const env = loadRelayEnv();
 const logger = pino({ level: env.LOG_LEVEL, base: { service: env.SERVICE_NAME } });
 
 const database = new PostgresDatabase(
-  createPool({ connectionString: env.DATABASE_URL, maxConnections: env.DATABASE_POOL_SIZE }),
+  createPool({
+    connectionString: env.DATABASE_URL,
+    maxConnections: env.DATABASE_POOL_SIZE,
+    onIdleClientError: (error) => logger.warn({ err: error }, 'idle database connection lost'),
+  }),
 );
 const connection = await RabbitMqConnection.open(env.RABBITMQ_URL, logger);
 const publisher = new RabbitMqEventPublisher(connection, LEDGER_EVENTS_EXCHANGE);

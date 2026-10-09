@@ -11,6 +11,7 @@ export interface Queryable {
 export interface PoolSettings {
   readonly connectionString: string;
   readonly maxConnections: number;
+  readonly onIdleClientError?: (error: Error) => void;
 }
 
 const parseSafeInteger = (value: string): number => {
@@ -24,8 +25,16 @@ const parseSafeInteger = (value: string): number => {
 pg.types.setTypeParser(pg.types.builtins.DATE, (value) => value);
 pg.types.setTypeParser(pg.types.builtins.INT8, parseSafeInteger);
 
-export const createPool = (settings: PoolSettings): pg.Pool =>
-  new pg.Pool({ connectionString: settings.connectionString, max: settings.maxConnections });
+const ignoreIdleClientError = (): void => undefined;
+
+export const createPool = (settings: PoolSettings): pg.Pool => {
+  const pool = new pg.Pool({
+    connectionString: settings.connectionString,
+    max: settings.maxConnections,
+  });
+  pool.on('error', settings.onIdleClientError ?? ignoreIdleClientError);
+  return pool;
+};
 
 export class PostgresDatabase implements Queryable, TransactionRunner {
   private readonly transactionClient = new AsyncLocalStorage<pg.PoolClient>();
