@@ -4,6 +4,9 @@ import { buildHttpServer } from '../../../../src/adapters/inbound/http/server.js
 import type { HealthIndicator } from '../../../../src/application/index.js';
 import { NOW } from '../../../support/entry-fixtures.js';
 import { createInMemoryLedger } from '../../../support/in-memory-ledger.js';
+import { createTestAuthority } from '../../../support/test-authority.js';
+
+const authority = await createTestAuthority();
 
 const indicator = (name: string, isHealthy: () => Promise<boolean>): HealthIndicator => ({
   name,
@@ -16,6 +19,7 @@ const buildServer = (healthIndicators: readonly HealthIndicator[]): Promise<Fast
     logLevel: 'silent',
     healthIndicators,
     api: createInMemoryLedger(NOW).api,
+    security: authority.security(),
   });
 
 describe('health routes', () => {

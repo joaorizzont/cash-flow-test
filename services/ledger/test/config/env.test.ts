@@ -3,10 +3,14 @@ import { loadApiEnv, loadRelayEnv } from '../../src/config/env.js';
 
 const DATABASE_URL = 'postgres://user:secret@localhost:5432/ledger';
 const RABBITMQ_URL = 'amqp://user:secret@localhost:5672';
+const AUTH = {
+  AUTH_ISSUER: 'http://localhost:8080/realms/cash-flow',
+  AUTH_JWKS_URL: 'http://keycloak:8080/realms/cash-flow/protocol/openid-connect/certs',
+};
 
 describe('loadApiEnv', () => {
   it('applies defaults', () => {
-    expect(loadApiEnv({ DATABASE_URL })).toEqual({
+    expect(loadApiEnv({ DATABASE_URL, ...AUTH })).toEqual({
       NODE_ENV: 'development',
       SERVICE_NAME: 'ledger',
       PORT: 3000,
@@ -15,22 +19,31 @@ describe('loadApiEnv', () => {
       DATABASE_POOL_SIZE: 10,
       DEFAULT_TIME_ZONE: 'America/Sao_Paulo',
       MAX_BACKDATED_DAYS: 30,
+      ...AUTH,
+      AUTH_AUDIENCE: 'cash-flow-api',
+      RATE_LIMIT_MAX: 600,
+      RATE_LIMIT_WINDOW_MS: 60_000,
     });
   });
 
   it('coerces numbers from strings', () => {
-    const env = loadApiEnv({ DATABASE_URL, PORT: '8080', DATABASE_POOL_SIZE: '20' });
+    const env = loadApiEnv({ DATABASE_URL, ...AUTH, PORT: '8080', DATABASE_POOL_SIZE: '20' });
 
     expect(env.PORT).toBe(8080);
     expect(env.DATABASE_POOL_SIZE).toBe(20);
   });
 
   it('requires the database url', () => {
-    expect(() => loadApiEnv({})).toThrow();
+    expect(() => loadApiEnv({ ...AUTH })).toThrow();
+  });
+
+  it('requires the token issuer and keys', () => {
+    expect(() => loadApiEnv({ DATABASE_URL })).toThrow();
+    expect(() => loadApiEnv({ DATABASE_URL, ...AUTH, AUTH_ISSUER: 'not a url' })).toThrow();
   });
 
   it('rejects an invalid log level', () => {
-    expect(() => loadApiEnv({ DATABASE_URL, LOG_LEVEL: 'verbose' })).toThrow();
+    expect(() => loadApiEnv({ DATABASE_URL, ...AUTH, LOG_LEVEL: 'verbose' })).toThrow();
   });
 });
 

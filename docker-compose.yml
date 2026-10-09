@@ -60,6 +60,30 @@ services:
       timeout: 3s
       retries: 10
 
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4
+    command: ['start-dev', '--import-realm']
+    restart: unless-stopped
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HOSTNAME: ${AUTH_PUBLIC_URL:-http://localhost:8180}
+      KC_HEALTH_ENABLED: 'true'
+    ports:
+      - '${KEYCLOAK_PORT:-8180}:8080'
+    volumes:
+      - ./infra/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
   ledger:
     build:
       context: .
@@ -73,6 +97,8 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-ledger:5432/${LEDGER_DB:-ledger}
       DEFAULT_TIME_ZONE: ${DEFAULT_TIME_ZONE:-America/Sao_Paulo}
       MAX_BACKDATED_DAYS: ${MAX_BACKDATED_DAYS:-30}
+      AUTH_ISSUER: ${AUTH_PUBLIC_URL:-http://localhost:8180}/realms/cash-flow
+      AUTH_JWKS_URL: http://keycloak:8080/realms/cash-flow/protocol/openid-connect/certs
     ports:
       - '${LEDGER_PORT:-3001}:3000'
     depends_on:
@@ -114,6 +140,8 @@ services:
       REDIS_URL: redis://redis:6379
       CACHE_FRESH_TTL_MS: ${CACHE_FRESH_TTL_MS:-5000}
       CACHE_STALE_TTL_SECONDS: ${CACHE_STALE_TTL_SECONDS:-86400}
+      AUTH_ISSUER: ${AUTH_PUBLIC_URL:-http://localhost:8180}/realms/cash-flow
+      AUTH_JWKS_URL: http://keycloak:8080/realms/cash-flow/protocol/openid-connect/certs
     ports:
       - '${DAILY_BALANCE_PORT:-3002}:3000'
     depends_on:

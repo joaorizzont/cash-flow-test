@@ -1,11 +1,7 @@
 import type { FastifyPluginAsyncTypebox } from '@fastify/type-provider-typebox';
 import { idempotentRequestOf } from '../idempotency.js';
 import type { LedgerApi } from '../ledger-api.js';
-import {
-  IdempotentHeadersSchema,
-  MerchantHeadersSchema,
-  problemResponses,
-} from '../schemas/common-schemas.js';
+import { IdempotentHeadersSchema, problemResponses } from '../schemas/common-schemas.js';
 import {
   EntryListSchema,
   EntryParamsSchema,
@@ -14,6 +10,8 @@ import {
   RecordEntryBodySchema,
   ReverseEntryBodySchema,
 } from '../schemas/entry-schemas.js';
+import { principalOf } from '../security/authentication.js';
+import { LedgerScope } from '../security/scopes.js';
 
 const TAGS = ['entries'];
 const REPLAYED_HEADER = 'idempotent-replayed';
@@ -33,11 +31,12 @@ export const entryRoutes =
           body: RecordEntryBodySchema,
           response: { 201: EntryViewSchema, ...problemResponses },
         },
+        config: { requiredScope: LedgerScope.WRITE },
       },
       async (request, reply) => {
-        const merchantId = request.headers['x-merchant-id'];
+        const { merchantId } = principalOf(request);
         const result = await api.idempotency.execute(
-          idempotentRequestOf(request, 'record-entry'),
+          idempotentRequestOf(request, { name: 'record-entry', merchantId }),
           () => api.recordEntry.execute({ ...request.body, merchantId }),
         );
         return reply
@@ -59,14 +58,15 @@ export const entryRoutes =
           body: ReverseEntryBodySchema,
           response: { 201: EntryViewSchema, ...problemResponses },
         },
+        config: { requiredScope: LedgerScope.WRITE },
         preValidation: async (request) => {
           request.body ??= {};
         },
       },
       async (request, reply) => {
-        const merchantId = request.headers['x-merchant-id'];
+        const { merchantId } = principalOf(request);
         const result = await api.idempotency.execute(
-          idempotentRequestOf(request, 'reverse-entry'),
+          idempotentRequestOf(request, { name: 'reverse-entry', merchantId }),
           () =>
             api.reverseEntry.execute({
               merchantId,
@@ -88,14 +88,14 @@ export const entryRoutes =
         schema: {
           tags: TAGS,
           summary: 'Get an entry',
-          headers: MerchantHeadersSchema,
           params: EntryParamsSchema,
           response: { 200: EntryViewSchema, ...problemResponses },
         },
+        config: { requiredScope: LedgerScope.READ },
       },
       async (request) =>
         api.getEntry.execute({
-          merchantId: request.headers['x-merchant-id'],
+          merchantId: principalOf(request).merchantId,
           entryId: request.params.entryId,
         }),
     );
@@ -106,12 +106,12 @@ export const entryRoutes =
         schema: {
           tags: TAGS,
           summary: 'List entries by business date period',
-          headers: MerchantHeadersSchema,
           querystring: ListEntriesQuerySchema,
           response: { 200: EntryListSchema, ...problemResponses },
         },
+        config: { requiredScope: LedgerScope.READ },
       },
       async (request) =>
-        api.listEntries.execute({ ...request.query, merchantId: request.headers['x-merchant-id'] }),
+        api.listEntries.execute({ ...request.query, merchantId: principalOf(request).merchantId }),
     );
   };

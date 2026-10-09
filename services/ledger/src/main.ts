@@ -6,6 +6,7 @@ import { PostgresHealthIndicator } from './adapters/outbound/postgres/postgres-h
 import { PostgresMigrator } from './adapters/outbound/postgres/postgres-migrator.js';
 import { loadApiEnv } from './config/env.js';
 import { createLedgerApi } from './container.js';
+import { JoseTokenVerifier } from './adapters/inbound/http/security/jose-token-verifier.js';
 
 const env = loadApiEnv();
 const logger = pino({ level: env.LOG_LEVEL, base: { service: env.SERVICE_NAME } });
@@ -29,6 +30,14 @@ const server = await buildHttpServer({
       maxBackdatedDays: env.MAX_BACKDATED_DAYS,
     },
   }),
+  security: {
+    verifier: JoseTokenVerifier.remote({
+      issuer: env.AUTH_ISSUER,
+      audience: env.AUTH_AUDIENCE,
+      jwksUrl: env.AUTH_JWKS_URL,
+    }),
+    rateLimit: { max: env.RATE_LIMIT_MAX, timeWindowMs: env.RATE_LIMIT_WINDOW_MS },
+  },
 });
 
 const shutdown = async (signal: NodeJS.Signals): Promise<void> => {

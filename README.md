@@ -10,8 +10,11 @@ A arquitetura é composta por **dois serviços independentes que se comunicam ap
 
 ```mermaid
 flowchart LR
-  C(["Comerciante"]) -->|HTTPS| L["ledger<br/>registro de lançamentos"]
-  C -->|HTTPS| D["daily-balance<br/>saldo consolidado"]
+  C(["Comerciante"]) -->|login OIDC| K["Keycloak<br/>realm cash-flow"]
+  C -->|HTTPS + JWT| L["ledger<br/>registro de lançamentos"]
+  C -->|HTTPS + JWT| D["daily-balance<br/>saldo consolidado"]
+  L -. chaves públicas JWKS .-> K
+  D -. chaves públicas JWKS .-> K
   L --> LDB[("PostgreSQL<br/>ledger + outbox")]
   O["ledger-outbox-relay"] -->|lê pendentes| LDB
   O -. CloudEvents .-> B{{"RabbitMQ<br/>cash-flow.ledger.events"}}
@@ -27,6 +30,7 @@ flowchart LR
 | `ledger-outbox-relay`    | Ler o outbox e publicar os eventos no RabbitMQ. Processo separado da API: uma falha na publicação nunca afeta o registro de lançamentos.               | `—`         |
 | `daily-balance`          | Servir o relatório de saldo diário a partir do modelo de leitura materializado, com cache Redis e circuit breakers. Aplica as migrations do seu banco. | `3002`      |
 | `daily-balance-consumer` | Consumir os eventos do ledger e manter o saldo diário materializado. Processo separado da API: a carga de consumo não afeta as consultas.              | `—`         |
+| `keycloak`               | Provedor de identidade (OIDC): autentica os usuários e emite os tokens JWT com o comerciante e os escopos.                                             | `8180`      |
 
 ## Justificativa das decisões de arquitetura e tecnologia
 
@@ -109,6 +113,9 @@ O custo é mais interfaces e mais arquivos do que uma organização em camadas s
 | TypeBox + `@fastify/type-provider-typebox`   | Um único schema valida a requisição, tipa o handler em TypeScript e gera a documentação OpenAPI, sem duplicar contratos                                                                                                          | Zod nas rotas, que exigiria conversão adicional para JSON Schema                                                |
 | Swagger UI (`@fastify/swagger`)              | Documentação navegável e sempre sincronizada com o código em `/docs`                                                                                                                                                             | Documentação manual, que diverge do código com o tempo                                                          |
 | UUID v7                                      | Identificadores ordenados no tempo: mantêm as inserções no índice B-tree próximas, ao contrário do UUID v4 aleatório                                                                                                             | UUID v4, IDs sequenciais do banco                                                                               |
+| Keycloak 26                                  | Provedor OIDC open source e maduro, que roda localmente com um comando e tem o realm versionado como código (clientes, escopos, papéis, mapeamento de claims e usuários)                                                         | Auth0 ou Cognito (gerenciados, mas sem execução local); implementar a emissão de tokens no próprio serviço      |
+| `jose`                                       | Validação de JWT e JWKS sem dependências nativas, com cache e tempo limite na busca de chaves; usada também nos testes para assinar tokens com chaves geradas na hora                                                            | `jsonwebtoken` + `jwks-rsa`, duas bibliotecas para o mesmo papel                                                |
+| `@fastify/rate-limit` e `@fastify/helmet`    | Plugins oficiais do Fastify para limite de requisições e headers de segurança                                                                                                                                                    | Implementação própria                                                                                           |
 | Testcontainers                               | Testes de integração contra um PostgreSQL real e descartável, cobrindo constraints, transações e concorrência que um mock não reproduz                                                                                           | Banco em memória (SQLite, pg-mem), com comportamento diferente do PostgreSQL                                    |
 | amqplib 2.x                                  | Cliente AMQP oficial da comunidade Node.js, com reconexão automática com backoff e jitter e suporte a publisher confirms                                                                                                         | Bibliotecas de mais alto nível, que escondem o controle de confirmação e retorno de mensagens                   |
 | pino                                         | Logger estruturado em JSON de baixo custo, o mesmo usado internamente pelo Fastify                                                                                                                                               | Winston, mais lento e sem integração nativa com o Fastify                                                       |
@@ -210,6 +217,7 @@ curl http://localhost:3002/health/ready
 | ledger                   | http://localhost:3001                                         |
 | daily-balance            | http://localhost:3002 (documentação em `/docs`)               |
 | RabbitMQ Management      | http://localhost:15672 (usuário/senha: `cashflow`/`cashflow`) |
+| Keycloak                 | http://localhost:8180 (administração: `admin`/`admin`)        |
 | PostgreSQL ledger        | `localhost:5432`                                              |
 | PostgreSQL daily-balance | `localhost:5433`                                              |
 | Redis                    | `localhost:6379`                                              |
@@ -262,33 +270,35 @@ Os testes de integração verificam inclusive cenários de concorrência e falha
 
 A documentação interativa (OpenAPI) fica em **http://localhost:3001/docs**.
 
-Até a fase de segurança, o comerciante é identificado pelo header `x-merchant-id` (UUID). Na Fase 6 ele passa a ser extraído do token JWT.
+Todas as rotas de negócio exigem um token de acesso (`Authorization: Bearer <token>`). O comerciante vem da claim `merchant_id` do token, nunca de um parâmetro da requisição. Veja [Segurança](#segurança) para obter um token.
 
-| Método | Rota                                    | Descrição                                                |
-| ------ | --------------------------------------- | -------------------------------------------------------- |
-| `PUT`  | `/v1/points-of-sale/{pointOfSaleId}`    | Cria ou atualiza um ponto de venda com seu fuso local    |
-| `POST` | `/v1/entries`                           | Registra um crédito ou débito (aceita `Idempotency-Key`) |
-| `POST` | `/v1/entries/{entryId}/reversal`        | Estorna um lançamento (aceita `Idempotency-Key`)         |
-| `GET`  | `/v1/entries/{entryId}`                 | Consulta um lançamento                                   |
-| `GET`  | `/v1/entries?from=&to=&page=&pageSize=` | Lista lançamentos por período de data de competência     |
-| `GET`  | `/health/live` e `/health/ready`        | Liveness e readiness (o readiness verifica o PostgreSQL) |
+| Método | Rota                                    | Escopo         | Descrição                                                |
+| ------ | --------------------------------------- | -------------- | -------------------------------------------------------- |
+| `PUT`  | `/v1/points-of-sale/{pointOfSaleId}`    | `ledger:write` | Cria ou atualiza um ponto de venda com seu fuso local    |
+| `POST` | `/v1/entries`                           | `ledger:write` | Registra um crédito ou débito (aceita `Idempotency-Key`) |
+| `POST` | `/v1/entries/{entryId}/reversal`        | `ledger:write` | Estorna um lançamento (aceita `Idempotency-Key`)         |
+| `GET`  | `/v1/entries/{entryId}`                 | `ledger:read`  | Consulta um lançamento                                   |
+| `GET`  | `/v1/entries?from=&to=&page=&pageSize=` | `ledger:read`  | Lista lançamentos por período de data de competência     |
+| `GET`  | `/health/live` e `/health/ready`        | público        | Liveness e readiness (o readiness verifica o PostgreSQL) |
 
 ### Exemplos
 
 ```bash
-MERCHANT=6f1c2a5e-8d4b-4c3a-9e2f-1a2b3c4d5e6f
+TOKEN=$(curl -s http://localhost:8180/realms/cash-flow/protocol/openid-connect/token \
+  -d grant_type=password -d client_id=cash-flow-app \
+  -d username=operador.centro -d password=cashflow | jq -r .access_token)
 POS=3e4d5c6b-7a89-4b0c-9d1e-2f3a4b5c6d7e
 
 curl -X PUT http://localhost:3001/v1/points-of-sale/$POS \
-  -H "content-type: application/json" -H "x-merchant-id: $MERCHANT" \
+  -H "content-type: application/json" -H "authorization: Bearer $TOKEN" \
   -d '{"timeZone":"America/Manaus"}'
 
 curl -X POST http://localhost:3001/v1/entries \
-  -H "content-type: application/json" -H "x-merchant-id: $MERCHANT" \
+  -H "content-type: application/json" -H "authorization: Bearer $TOKEN" \
   -H "idempotency-key: venda-1024" \
   -d "{\"type\":\"CREDIT\",\"amountInCents\":15990,\"description\":\"Venda 1024\",\"pointOfSaleId\":\"$POS\"}"
 
-curl "http://localhost:3001/v1/entries?from=2026-10-01&to=2026-10-31" -H "x-merchant-id: $MERCHANT"
+curl "http://localhost:3001/v1/entries?from=2026-10-01&to=2026-10-31" -H "authorization: Bearer $TOKEN"
 ```
 
 Resposta de um lançamento (`201 Created`, com header `Location`):
@@ -331,6 +341,8 @@ Todas as respostas de erro seguem o padrão [Problem Details (RFC 9457)](https:/
 | Status | `code`                       | Quando                                                         |
 | ------ | ---------------------------- | -------------------------------------------------------------- |
 | 400    | `VALIDATION_ERROR`           | Corpo, parâmetros ou headers inválidos                         |
+| 401    | `UNAUTHORIZED`               | Token ausente, inválido ou expirado                            |
+| 403    | `INSUFFICIENT_SCOPE`         | O token não concede o escopo exigido pela rota                 |
 | 404    | `ENTRY_NOT_FOUND`            | Lançamento inexistente ou de outro comerciante                 |
 | 404    | `ROUTE_NOT_FOUND`            | Rota inexistente                                               |
 | 409    | `ENTRY_ALREADY_REVERSED`     | O lançamento já foi estornado                                  |
@@ -338,7 +350,10 @@ Todas as respostas de erro seguem o padrão [Problem Details (RFC 9457)](https:/
 | 422    | `REVERSAL_OF_REVERSAL`       | Tentativa de estornar um estorno                               |
 | 422    | `POINT_OF_SALE_NOT_FOUND`    | Ponto de venda não configurado para o comerciante              |
 | 422    | `IDEMPOTENCY_KEY_REUSED`     | Chave de idempotência reutilizada com outra requisição         |
+| 413    | `FST_ERR_CTP_BODY_TOO_LARGE` | Corpo maior que 16 KiB                                         |
+| 429    | `RATE_LIMITED`               | Limite de requisições do comerciante excedido (`Retry-After`)  |
 | 500    | `INTERNAL_ERROR`             | Erro inesperado (detalhes apenas no log)                       |
+| 503    | `AUTHENTICATION_UNAVAILABLE` | Não foi possível obter as chaves públicas para validar o token |
 
 ## Eventos de integração
 
@@ -507,7 +522,7 @@ As mensagens podem ser inspecionadas antes no RabbitMQ Management (http://localh
 
 ## API do consolidado
 
-A documentação interativa (OpenAPI) fica em **http://localhost:3002/docs**. O comerciante é identificado pelo header `x-merchant-id` até a Fase 6.
+A documentação interativa (OpenAPI) fica em **http://localhost:3002/docs**. As rotas exigem um token com o escopo `balance:read`, e o comerciante vem da claim `merchant_id` do token.
 
 | Método | Rota                                | Descrição                                          |
 | ------ | ----------------------------------- | -------------------------------------------------- |
@@ -521,7 +536,7 @@ Saldo de um dia:
 
 ```bash
 curl http://localhost:3002/v1/daily-balances/2026-10-09 \
-  -H 'x-merchant-id: 6f1c2a5e-8d4b-4c3a-9e2f-1a2b3c4d5e6f'
+  -H "authorization: Bearer $TOKEN"
 ```
 
 ```json
@@ -542,7 +557,7 @@ Relatório de um período, com totais e uma linha por dia (dias sem movimento ap
 
 ```bash
 curl 'http://localhost:3002/v1/daily-balances?from=2026-10-01&to=2026-10-09' \
-  -H 'x-merchant-id: 6f1c2a5e-8d4b-4c3a-9e2f-1a2b3c4d5e6f'
+  -H "authorization: Bearer $TOKEN"
 ```
 
 | Campo                   | Significado                                                                             |
@@ -583,6 +598,93 @@ Medição local (Docker Desktop, 50 req/s por 20 s, mistura de consultas de um d
 | `CIRCUIT_FAILURE_THRESHOLD` | `5`     | Falhas consecutivas que abrem o circuito                        |
 | `CIRCUIT_RESET_TIMEOUT_MS`  | `10000` | Tempo com o circuito aberto antes da chamada de teste           |
 
+## Segurança
+
+### Autenticação e autorização
+
+```mermaid
+sequenceDiagram
+  participant U as Comerciante
+  participant K as Keycloak
+  participant A as ledger / daily-balance
+  U->>K: login (Authorization Code + PKCE)
+  K-->>U: access token JWT (5 min) com merchant_id e escopos
+  U->>A: requisição com Authorization: Bearer
+  A->>K: busca as chaves públicas (JWKS), apenas na primeira vez ou em rotação
+  A->>A: valida assinatura, emissor, audiência, expiração e escopo
+  A-->>U: resposta somente com dados do merchant_id do token
+```
+
+| Aspecto                   | Decisão                                                                                                                                                                                                                                |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Provedor de identidade    | Keycloak 26 (OIDC), com o realm versionado em [`infra/keycloak/cash-flow-realm.json`](infra/keycloak/cash-flow-realm.json) e importado na subida                                                                                       |
+| Formato do token          | JWT assinado com RS256 e validado localmente pelos serviços com as chaves públicas do JWKS. Não há chamada ao Keycloak por requisição                                                                                                  |
+| Validações                | Assinatura, algoritmo (apenas RS256), emissor (`iss`), audiência (`aud: cash-flow-api`), expiração com tolerância de 5 s, presença de `sub` e de `merchant_id` em formato UUID                                                         |
+| Identidade do comerciante | Claim `merchant_id`, vinda de um atributo do usuário que só o administrador pode alterar (definido no perfil de usuário do realm). O header `x-merchant-id` deixou de existir: um cliente não consegue se passar por outro comerciante |
+| Autorização               | Escopos OAuth por rota. Cada escopo do realm está vinculado a papéis, então o Keycloak só o inclui no token se o usuário tiver o papel correspondente                                                                                  |
+| Respostas                 | `401` com `WWW-Authenticate: Bearer` (RFC 6750) para token ausente ou inválido; `403` com `error="insufficient_scope"` quando falta o escopo                                                                                           |
+| Rotas públicas            | Apenas `/health/*` e `/docs`                                                                                                                                                                                                           |
+| Onde fica no código       | Adapter de entrada HTTP (`adapters/inbound/http/security`). A aplicação continua recebendo apenas o `merchantId` e não conhece JWT nem Keycloak                                                                                        |
+
+| Escopo         | Permite                                                      | Papel `merchant-operator` | Papel `merchant-viewer` |
+| -------------- | ------------------------------------------------------------ | ------------------------- | ----------------------- |
+| `ledger:write` | Registrar e estornar lançamentos, configurar pontos de venda | sim                       | não                     |
+| `ledger:read`  | Consultar lançamentos                                        | sim                       | sim                     |
+| `balance:read` | Consultar o saldo consolidado                                | sim                       | sim                     |
+
+### Usuários de demonstração
+
+| Usuário           | Senha      | Papel               | Comerciante                            |
+| ----------------- | ---------- | ------------------- | -------------------------------------- |
+| `operador.centro` | `cashflow` | `merchant-operator` | `6f1c2a5e-8d4b-4c3a-9e2f-1a2b3c4d5e6f` |
+| `analista.centro` | `cashflow` | `merchant-viewer`   | `6f1c2a5e-8d4b-4c3a-9e2f-1a2b3c4d5e6f` |
+| `operador.norte`  | `cashflow` | `merchant-operator` | `9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d` |
+
+Obtendo um token pela linha de comando:
+
+```bash
+TOKEN=$(curl -s http://localhost:8180/realms/cash-flow/protocol/openid-connect/token \
+  -d grant_type=password -d client_id=cash-flow-app \
+  -d username=operador.centro -d password=cashflow | jq -r .access_token)
+```
+
+> O fluxo de senha (_Resource Owner Password Credentials_) está habilitado apenas para facilitar testes locais e o teste de carga. Ele foi descontinuado pelo OAuth 2.1 e deve ser desabilitado em produção, onde os clientes usam Authorization Code com PKCE (já habilitado no client `cash-flow-app`).
+
+### Proteções adicionais
+
+| Proteção                      | Detalhe                                                                                                                                                                                                                                                                           |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rate limiting por comerciante | Contado pelo `merchant_id` do token. Padrão: 600 req/min no ledger e 1.200 req/min no consolidado, configuráveis por `RATE_LIMIT_MAX` e `RATE_LIMIT_WINDOW_MS`. Excedido, retorna `429` com `Retry-After`. Health checks não são limitados                                        |
+| Headers de segurança          | `@fastify/helmet`: `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options`, `Content-Security-Policy` e outros. A diretiva `upgrade-insecure-requests` foi removida porque o TLS termina no gateway e ela impediria o uso da documentação em HTTP local |
+| Limite de corpo               | 16 KiB no ledger, o suficiente para um lançamento e pequeno o bastante para conter abusos                                                                                                                                                                                         |
+| Validação de entrada          | Todo corpo, parâmetro e query é validado por JSON Schema, sem propriedades extras; os value objects do domínio validam novamente                                                                                                                                                  |
+| Erros sem detalhes internos   | Erros inesperados retornam apenas `INTERNAL_ERROR`; o detalhe fica no log                                                                                                                                                                                                         |
+| Proteção contra força bruta   | Habilitada no realm do Keycloak                                                                                                                                                                                                                                                   |
+| Menor privilégio              | Containers rodam com usuário não-root; cada serviço tem seu próprio banco                                                                                                                                                                                                         |
+
+### Disponibilidade da autenticação
+
+Como os tokens são validados localmente, o Keycloak não está no caminho de cada requisição. As chaves públicas são buscadas na primeira validação e mantidas em memória; uma nova busca só acontece quando chega um token assinado por uma chave desconhecida (rotação). Assim:
+
+- uma queda do Keycloak não afeta requisições com tokens já emitidos;
+- novos logins ficam indisponíveis durante a queda;
+- se uma réplica subir com o Keycloak fora, ela responde `503 AUTHENTICATION_UNAVAILABLE` até conseguir buscar as chaves. Os serviços não dependem do Keycloak para iniciar.
+
+### Testes de segurança
+
+- **Unidade:** tokens assinados por uma chave gerada no teste cobrem token ausente, assinatura de outra chave, token expirado, outra audiência, outro emissor, sem `merchant_id`, `merchant_id` inválido, token malformado, outro esquema de autenticação, escopo insuficiente, header `x-merchant-id` forjado, rate limit por comerciante, headers de segurança e limite de corpo.
+- **Integração:** um Keycloak real é iniciado com o arquivo do realm. Os testes verificam que os tokens trazem o comerciante e os escopos de cada papel, que o operador registra, que o analista recebe `403` ao tentar registrar e que outro comerciante não enxerga o lançamento (`404`).
+
+### Em produção
+
+| Item          | Recomendação                                                                                                                                                                                     |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| TLS           | Terminado no API Gateway ou no ingress; tráfego interno com mTLS se houver service mesh                                                                                                          |
+| Segredos      | Senhas de banco, RabbitMQ e Keycloak em um gerenciador de segredos (AWS Secrets Manager, Vault), nunca no compose                                                                                |
+| Rate limiting | Também no API Gateway (por IP e por cliente), com o limite da aplicação como segunda camada. O limite atual é por réplica; com várias réplicas, usar um store compartilhado (Redis) ou o gateway |
+| Keycloak      | Modo produção (`start`), banco próprio, alta disponibilidade e fluxo de senha desabilitado                                                                                                       |
+| Rede          | Bancos, RabbitMQ e Redis em sub-redes privadas, acessíveis apenas pelos serviços                                                                                                                 |
+
 ## Resiliência
 
 Resumo do comportamento do sistema diante de cada falha. Todos os cenários abaixo foram executados com o ambiente do Docker Compose, derrubando o componente com `docker compose stop`, e os principais também são cobertos por testes de integração.
@@ -621,8 +723,8 @@ O teste de resiliência automatizado (derrubar o consolidado sob carga e medir o
 | 3    | **Publicação de eventos**: contrato versionado dos eventos, outbox relay com `FOR UPDATE SKIP LOCKED`, publisher RabbitMQ com confirms e `mandatory`                                 | ✅ Concluída |
 | 4    | **Consolidação diária**: domínio do saldo diário, consumidor idempotente por `event_id`, UPSERT aditivo, retentativas e DLQ, reprocessamento de um dia                               | ✅ Concluída |
 | 5    | **API do consolidado**: consulta por dia e por período, saldo acumulado, cache Redis com fallback para o banco e circuit breaker                                                     | ✅ Concluída |
-| 6    | **Segurança**: Keycloak (OIDC), validação de JWT, escopos, `merchant_id` vindo do token, rate limiting, headers de segurança                                                         | ⏳ Próxima   |
-| 7    | **Observabilidade**: OpenTelemetry (traces, métricas, logs), correlation id ponta a ponta, Prometheus, Grafana, Tempo e Loki, dashboards e alertas                                   | Pendente     |
+| 6    | **Segurança**: Keycloak (OIDC), validação de JWT, escopos, `merchant_id` vindo do token, rate limiting, headers de segurança                                                         | ✅ Concluída |
+| 7    | **Observabilidade**: OpenTelemetry (traces, métricas, logs), correlation id ponta a ponta, Prometheus, Grafana, Tempo e Loki, dashboards e alertas                                   | ⏳ Próxima   |
 | 8    | **Resiliência e carga**: teste que derruba o consolidado e prova que o ledger continua respondendo; k6 com 50 req/s e limite de 5% de falhas                                         | Pendente     |
 | 9    | **Documentação**: domínios e capacidades, requisitos, arquitetura alvo e de transição, ADRs, segurança, observabilidade e estimativa de custos em `docs/`                            | Pendente     |
 | 10   | **CI/CD**: GitHub Actions com lint, testes, cobertura, CodeQL e Trivy; Terraform opcional para AWS                                                                                   | Pendente     |

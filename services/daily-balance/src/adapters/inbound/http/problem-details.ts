@@ -24,6 +24,8 @@ const UNEXPECTED_PROBLEM: Problem = {
 const isClientError = (error: FastifyError): boolean =>
   error.statusCode !== undefined && error.statusCode >= 400 && error.statusCode < 500;
 
+const isUnavailable = (error: FastifyError): boolean => error.statusCode === 503;
+
 const problemFrom = (error: FastifyError): Problem => {
   if (error instanceof DomainError) {
     return { status: STATUS_BY_CODE[error.code] ?? 422, code: error.code, detail: error.message };
@@ -31,7 +33,7 @@ const problemFrom = (error: FastifyError): Problem => {
   if (error.validation !== undefined) {
     return { status: 400, code: 'VALIDATION_ERROR', detail: error.message };
   }
-  if (isClientError(error)) {
+  if (isClientError(error) || isUnavailable(error)) {
     return { status: error.statusCode ?? 400, code: error.code, detail: error.message };
   }
   return UNEXPECTED_PROBLEM;

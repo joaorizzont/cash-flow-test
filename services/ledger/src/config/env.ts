@@ -12,6 +12,11 @@ const baseSchema = z.object({
 const apiSchema = baseSchema.extend({
   DEFAULT_TIME_ZONE: z.string().default('America/Sao_Paulo'),
   MAX_BACKDATED_DAYS: z.coerce.number().int().nonnegative().default(30),
+  AUTH_ISSUER: z.url(),
+  AUTH_JWKS_URL: z.url(),
+  AUTH_AUDIENCE: z.string().min(1).default('cash-flow-api'),
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(600),
+  RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
 });
 
 const relaySchema = baseSchema.extend({

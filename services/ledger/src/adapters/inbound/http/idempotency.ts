@@ -6,7 +6,6 @@ interface IdempotentHttpRequest {
   readonly url: string;
   readonly body: unknown;
   readonly headers: {
-    readonly 'x-merchant-id': string;
     readonly 'idempotency-key'?: string | undefined;
   };
 }
@@ -21,12 +20,17 @@ const fingerprintOf = (request: IdempotentHttpRequest): string =>
     .update(`${request.method} ${request.url}\n${canonicalJson(request.body)}`)
     .digest('hex');
 
+export interface IdempotentOperation {
+  readonly name: string;
+  readonly merchantId: string;
+}
+
 export const idempotentRequestOf = (
   request: IdempotentHttpRequest,
-  operation: string,
+  operation: IdempotentOperation,
 ): IdempotentRequest => ({
-  merchantId: request.headers['x-merchant-id'],
+  merchantId: operation.merchantId,
   key: request.headers['idempotency-key'] ?? null,
-  operation,
+  operation: operation.name,
   fingerprint: fingerprintOf(request),
 });

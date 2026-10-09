@@ -17,7 +17,11 @@ export const registerHealthRoutes = (
   app: FastifyInstance,
   indicators: readonly HealthIndicator[],
 ): void => {
-  const options = { logLevel: 'warn', schema: { hide: true } } as const;
+  const options = {
+    logLevel: 'warn',
+    schema: { hide: true },
+    config: { rateLimit: false },
+  } as const;
 
   app.get('/health/live', options, async () => ({ status: 'up' satisfies Status }));
 

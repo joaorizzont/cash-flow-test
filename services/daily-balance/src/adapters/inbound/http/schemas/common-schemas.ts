@@ -1,9 +1,5 @@
 import { Type } from 'typebox';
 
-export const MerchantHeadersSchema = Type.Object({
-  'x-merchant-id': Type.String({ format: 'uuid', description: 'Merchant identifier' }),
-});
-
 export const ProblemSchema = Type.Object(
   {
     type: Type.String(),
@@ -17,6 +13,9 @@ export const ProblemSchema = Type.Object(
 
 export const problemResponses = {
   400: Type.Ref('Problem'),
+  401: Type.Ref('Problem'),
+  403: Type.Ref('Problem'),
+  429: Type.Ref('Problem'),
   500: Type.Ref('Problem'),
   503: Type.Ref('Problem'),
 };

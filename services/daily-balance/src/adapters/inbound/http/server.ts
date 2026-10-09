@@ -8,11 +8,18 @@ import { handleError, handleNotFound } from './problem-details.js';
 import { dailyBalanceRoutes } from './routes/daily-balance-routes.js';
 import { registerHealthRoutes } from './routes/health-routes.js';
 import { ProblemSchema } from './schemas/common-schemas.js';
+import {
+  BEARER_SECURITY_SCHEME,
+  registerHttpSecurity,
+  type HttpSecurityOptions,
+  withoutInsecureRequestUpgrade,
+} from './security/http-security.js';
 
 export interface HttpServerOptions {
   readonly logger: FastifyBaseLogger;
   readonly healthIndicators: readonly HealthIndicator[];
   readonly api: DailyBalanceApi;
+  readonly security: HttpSecurityOptions;
 }
 
 const OPEN_API_INFO = {
@@ -31,8 +38,19 @@ export const buildHttpServer = async (options: HttpServerOptions): Promise<Fasti
   app.setErrorHandler(handleError);
   app.setNotFoundHandler(handleNotFound);
 
-  await app.register(swagger, { openapi: { info: OPEN_API_INFO } });
-  await app.register(swaggerUi, { routePrefix: '/docs' });
+  await registerHttpSecurity(app, options.security);
+  await app.register(swagger, {
+    openapi: {
+      info: OPEN_API_INFO,
+      components: { securitySchemes: BEARER_SECURITY_SCHEME },
+      security: [{ bearerAuth: [] }],
+    },
+  });
+  await app.register(swaggerUi, {
+    routePrefix: '/docs',
+    staticCSP: true,
+    transformStaticCSP: withoutInsecureRequestUpgrade,
+  });
 
   registerHealthRoutes(app, options.healthIndicators);
   await app.register(dailyBalanceRoutes(options.api));

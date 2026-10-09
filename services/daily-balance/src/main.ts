@@ -1,5 +1,6 @@
 import { pino } from 'pino';
 import { buildHttpServer } from './adapters/inbound/http/server.js';
+import { JoseTokenVerifier } from './adapters/inbound/http/security/jose-token-verifier.js';
 import { dailyBalanceMigrations } from './adapters/outbound/postgres/migrations/index.js';
 import { createPool, PostgresDatabase } from './adapters/outbound/postgres/postgres-database.js';
 import { PostgresHealthIndicator } from './adapters/outbound/postgres/postgres-health-indicator.js';
@@ -38,6 +39,14 @@ const server = await buildHttpServer({
       circuitResetTimeoutMs: env.CIRCUIT_RESET_TIMEOUT_MS,
     },
   }),
+  security: {
+    verifier: JoseTokenVerifier.remote({
+      issuer: env.AUTH_ISSUER,
+      audience: env.AUTH_AUDIENCE,
+      jwksUrl: env.AUTH_JWKS_URL,
+    }),
+    rateLimit: { max: env.RATE_LIMIT_MAX, timeWindowMs: env.RATE_LIMIT_WINDOW_MS },
+  },
 });
 
 const shutdown = async (signal: NodeJS.Signals): Promise<void> => {

@@ -1,0 +1,214 @@
+{
+  "realm": "cash-flow",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 300,
+  "roles": {
+    "realm": [
+      {
+        "name": "merchant-operator",
+        "description": "Records entries and reads balances of the merchant"
+      },
+      {
+        "name": "merchant-viewer",
+        "description": "Reads entries and balances of the merchant"
+      }
+    ]
+  },
+  "clientScopes": [
+    {
+      "name": "basic",
+      "description": "OpenID Connect scope for add all basic claims to the token",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "auth_time",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usersessionmodel-note-mapper",
+          "config": {
+            "user.session.note": "AUTH_TIME",
+            "claim.name": "auth_time",
+            "jsonType.label": "long",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ledger:write",
+      "description": "Record and reverse entries, configure points of sale",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "ledger:read",
+      "description": "Read entries",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "balance:read",
+      "description": "Read consolidated daily balances",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    }
+  ],
+  "scopeMappings": [
+    {
+      "clientScope": "ledger:write",
+      "roles": ["merchant-operator"]
+    },
+    {
+      "clientScope": "ledger:read",
+      "roles": ["merchant-operator", "merchant-viewer"]
+    },
+    {
+      "clientScope": "balance:read",
+      "roles": ["merchant-operator", "merchant-viewer"]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "cash-flow-app",
+      "name": "Cash Flow",
+      "enabled": true,
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["http://localhost/*", "http://127.0.0.1/*"],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["basic", "ledger:write", "ledger:read", "balance:read"],
+      "optionalClientScopes": [],
+      "protocolMappers": [
+        {
+          "name": "merchant id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "merchant_id",
+            "claim.name": "merchant_id",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "cash flow api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "cash-flow-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "operador.centro",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Operador Centro",
+      "lastName": "Demo",
+      "email": "operador.centro@cash-flow.local",
+      "attributes": {
+        "merchant_id": ["6f1c2a5e-8d4b-4c3a-9e2f-1a2b3c4d5e6f"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "cashflow",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["merchant-operator"]
+    },
+    {
+      "username": "analista.centro",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Analista Centro",
+      "lastName": "Demo",
+      "email": "analista.centro@cash-flow.local",
+      "attributes": {
+        "merchant_id": ["6f1c2a5e-8d4b-4c3a-9e2f-1a2b3c4d5e6f"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "cashflow",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["merchant-viewer"]
+    },
+    {
+      "username": "operador.norte",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Operador Norte",
+      "lastName": "Demo",
+      "email": "operador.norte@cash-flow.local",
+      "attributes": {
+        "merchant_id": ["9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "cashflow",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["merchant-operator"]
+    }
+  ],
+  "components": {
+    "org.keycloak.userprofile.UserProfileProvider": [
+      {
+        "providerId": "declarative-user-profile",
+        "subComponents": {},
+        "config": {
+          "kc.user.profile.config": [
+            "{\"attributes\": [{\"name\": \"username\", \"displayName\": \"${username}\", \"validations\": {\"length\": {\"min\": 3, \"max\": 255}, \"username-prohibited-characters\": {}, \"up-username-not-idn-homograph\": {}}, \"permissions\": {\"view\": [\"admin\", \"user\"], \"edit\": [\"admin\", \"user\"]}, \"multivalued\": false}, {\"name\": \"email\", \"displayName\": \"${email}\", \"validations\": {\"email\": {}, \"length\": {\"max\": 255}}, \"permissions\": {\"view\": [\"admin\", \"user\"], \"edit\": [\"admin\", \"user\"]}, \"multivalued\": false}, {\"name\": \"firstName\", \"displayName\": \"${firstName}\", \"validations\": {\"length\": {\"max\": 255}, \"person-name-prohibited-characters\": {}}, \"permissions\": {\"view\": [\"admin\", \"user\"], \"edit\": [\"admin\", \"user\"]}, \"multivalued\": false}, {\"name\": \"lastName\", \"displayName\": \"${lastName}\", \"validations\": {\"length\": {\"max\": 255}, \"person-name-prohibited-characters\": {}}, \"permissions\": {\"view\": [\"admin\", \"user\"], \"edit\": [\"admin\", \"user\"]}, \"multivalued\": false}, {\"name\": \"merchant_id\", \"displayName\": \"Merchant\", \"validations\": {\"pattern\": {\"pattern\": \"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\", \"error-message\": \"Invalid merchant id\"}}, \"permissions\": {\"view\": [\"admin\", \"user\"], \"edit\": [\"admin\"]}, \"multivalued\": false}], \"groups\": [{\"name\": \"user-metadata\", \"displayHeader\": \"User metadata\", \"displayDescription\": \"Attributes, which refer to user metadata\"}]}"
+          ]
+        }
+      }
+    ]
+  }
+}

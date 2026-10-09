@@ -9,10 +9,14 @@ import {
 const DATABASE_URL = 'postgres://user:secret@localhost:5433/daily_balance';
 const RABBITMQ_URL = 'amqp://user:secret@localhost:5672';
 const REDIS_URL = 'redis://localhost:6379';
+const AUTH = {
+  AUTH_ISSUER: 'http://localhost:8080/realms/cash-flow',
+  AUTH_JWKS_URL: 'http://keycloak:8080/realms/cash-flow/protocol/openid-connect/certs',
+};
 
 describe('loadApiEnv', () => {
   it('applies defaults', () => {
-    expect(loadApiEnv({ DATABASE_URL, REDIS_URL })).toEqual({
+    expect(loadApiEnv({ DATABASE_URL, REDIS_URL, ...AUTH })).toEqual({
       NODE_ENV: 'development',
       SERVICE_NAME: 'daily-balance',
       PORT: 3000,
@@ -26,20 +30,25 @@ describe('loadApiEnv', () => {
       CACHE_TIMEOUT_MS: 100,
       CIRCUIT_FAILURE_THRESHOLD: 5,
       CIRCUIT_RESET_TIMEOUT_MS: 10_000,
+      ...AUTH,
+      AUTH_AUDIENCE: 'cash-flow-api',
+      RATE_LIMIT_MAX: 1_200,
+      RATE_LIMIT_WINDOW_MS: 60_000,
     });
   });
 
   it('coerces the port from string', () => {
-    expect(loadApiEnv({ DATABASE_URL, REDIS_URL, PORT: '8080' }).PORT).toBe(8080);
+    expect(loadApiEnv({ DATABASE_URL, REDIS_URL, ...AUTH, PORT: '8080' }).PORT).toBe(8080);
   });
 
   it('requires the database and redis urls', () => {
-    expect(() => loadApiEnv({ REDIS_URL })).toThrow();
-    expect(() => loadApiEnv({ DATABASE_URL })).toThrow();
+    expect(() => loadApiEnv({ REDIS_URL, ...AUTH })).toThrow();
+    expect(() => loadApiEnv({ DATABASE_URL, ...AUTH })).toThrow();
+    expect(() => loadApiEnv({ DATABASE_URL, REDIS_URL })).toThrow();
   });
 
   it('rejects an invalid log level', () => {
-    expect(() => loadApiEnv({ DATABASE_URL, REDIS_URL, LOG_LEVEL: 'verbose' })).toThrow();
+    expect(() => loadApiEnv({ DATABASE_URL, REDIS_URL, ...AUTH, LOG_LEVEL: 'verbose' })).toThrow();
   });
 });
 

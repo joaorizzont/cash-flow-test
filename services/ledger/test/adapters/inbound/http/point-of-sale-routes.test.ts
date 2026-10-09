@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildHttpServer } from '../../../../src/adapters/inbound/http/server.js';
 import { MERCHANT_ID, NOW, POINT_OF_SALE_ID } from '../../../support/entry-fixtures.js';
 import { createInMemoryLedger } from '../../../support/in-memory-ledger.js';
+import { createTestAuthority } from '../../../support/test-authority.js';
+
+const authority = await createTestAuthority();
+const headers = await authority.headersFor(MERCHANT_ID);
 
 describe('point of sale routes', () => {
   let server: FastifyInstance;
@@ -11,7 +15,7 @@ describe('point of sale routes', () => {
     server.inject({
       method: 'PUT',
       url: `/v1/points-of-sale/${POINT_OF_SALE_ID}`,
-      headers: { 'x-merchant-id': MERCHANT_ID },
+      headers,
       payload: { timeZone },
     });
 
@@ -21,6 +25,7 @@ describe('point of sale routes', () => {
       logLevel: 'silent',
       healthIndicators: [],
       api: createInMemoryLedger(NOW).api,
+      security: authority.security(),
     });
   });
 
@@ -52,7 +57,7 @@ describe('point of sale routes', () => {
     const response = await server.inject({
       method: 'POST',
       url: '/v1/entries',
-      headers: { 'x-merchant-id': MERCHANT_ID },
+      headers,
       payload: {
         type: 'CREDIT',
         amountInCents: 100,

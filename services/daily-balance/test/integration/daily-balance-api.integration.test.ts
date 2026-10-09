@@ -14,9 +14,11 @@ import { consolidateCommand, MERCHANT_ID, OTHER_MERCHANT_ID } from '../support/f
 import { FixedClock } from '../support/fixed-clock.js';
 import { connectTestDatabase, type TestDatabase } from './support/test-database.js';
 import { waitUntil } from './support/wait-until.js';
+import { createTestAuthority } from '../support/test-authority.js';
 
 const silentLogger = pino({ level: 'silent' });
-const headers = { 'x-merchant-id': MERCHANT_ID };
+const authority = await createTestAuthority();
+const headers = await authority.headersFor(MERCHANT_ID);
 const SETTINGS = {
   databaseTimeoutMs: 1_000,
   cacheFreshForMs: 5_000,
@@ -43,6 +45,7 @@ describe('daily balance API with PostgreSQL and Redis', () => {
         logger: silentLogger,
         clock,
       }),
+      security: authority.security(),
     });
     servers.push(server);
     return server;

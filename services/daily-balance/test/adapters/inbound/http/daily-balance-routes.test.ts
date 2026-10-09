@@ -12,8 +12,10 @@ import { dailyBalance, MERCHANT_ID } from '../../../support/fixtures.js';
 import { FixedClock } from '../../../support/fixed-clock.js';
 import { InMemoryReadModel } from '../../../support/in-memory-read-model.js';
 import { InMemoryReportCache } from '../../../support/in-memory-report-cache.js';
+import { createTestAuthority } from '../../../support/test-authority.js';
 
-const headers = { 'x-merchant-id': MERCHANT_ID };
+const authority = await createTestAuthority();
+const headers = await authority.headersFor(MERCHANT_ID);
 
 describe('daily balance routes', () => {
   let server: FastifyInstance;
@@ -25,6 +27,7 @@ describe('daily balance routes', () => {
       logger: pino({ level: 'silent' }),
       healthIndicators: [],
       api: { getBalanceReport },
+      security: authority.security(),
     });
 
   const cachedReport = () =>
@@ -103,8 +106,6 @@ describe('daily balance routes', () => {
     ['/v1/daily-balances/2026-13-01', headers],
     ['/v1/daily-balances?from=2026-10-09', headers],
     ['/v1/daily-balances?from=2026-10-09&to=2026-10-01', headers],
-    ['/v1/daily-balances/2026-10-09', {}],
-    ['/v1/daily-balances/2026-10-09', { 'x-merchant-id': 'merchant-1' }],
   ])('rejects %s with a problem', async (url, requestHeaders) => {
     const response = await server.inject({ method: 'GET', url, headers: requestHeaders });
 

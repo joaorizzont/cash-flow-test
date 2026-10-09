@@ -4,12 +4,20 @@ import { buildHttpServer } from '../../../../src/adapters/inbound/http/server.js
 import type { LedgerApi } from '../../../../src/adapters/inbound/http/ledger-api.js';
 import { MERCHANT_ID, NOW, OTHER_MERCHANT_ID, TODAY } from '../../../support/entry-fixtures.js';
 import { createInMemoryLedger, type InMemoryLedger } from '../../../support/in-memory-ledger.js';
+import { createTestAuthority } from '../../../support/test-authority.js';
 
-const merchantHeaders = { 'x-merchant-id': MERCHANT_ID };
+const authority = await createTestAuthority();
+const merchantHeaders = await authority.headersFor(MERCHANT_ID);
 const saleBody = { type: 'CREDIT', amountInCents: 15_990, description: 'Sale #1024' };
 
 const buildServer = (api: LedgerApi): Promise<FastifyInstance> =>
-  buildHttpServer({ serviceName: 'test', logLevel: 'silent', healthIndicators: [], api });
+  buildHttpServer({
+    serviceName: 'test',
+    logLevel: 'silent',
+    healthIndicators: [],
+    api,
+    security: authority.security(),
+  });
 
 describe('entry routes', () => {
   let ledger: InMemoryLedger;
@@ -86,17 +94,6 @@ describe('entry routes', () => {
       expect(response.json().detail).toContain(detail);
     });
 
-    it('requires the merchant header', async () => {
-      const response = await server.inject({
-        method: 'POST',
-        url: '/v1/entries',
-        payload: saleBody,
-      });
-
-      expect(response.statusCode).toBe(400);
-      expect(response.json().detail).toContain('x-merchant-id');
-    });
-
     it('maps business rule violations to 422', async () => {
       const response = await recordSale({}, { ...saleBody, businessDate: '2030-01-01' });
 
@@ -160,7 +157,7 @@ describe('entry routes', () => {
       const response = await server.inject({
         method: 'GET',
         url: `/v1/entries/${entry.id}`,
-        headers: { 'x-merchant-id': OTHER_MERCHANT_ID },
+        headers: await authority.headersFor(OTHER_MERCHANT_ID),
       });
 
       expect(response.statusCode).toBe(404);

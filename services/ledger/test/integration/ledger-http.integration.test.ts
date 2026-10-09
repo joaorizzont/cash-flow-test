@@ -6,8 +6,10 @@ import { createLedgerApi } from '../../src/container.js';
 import { MERCHANT_ID, NOW, POINT_OF_SALE_ID } from '../support/entry-fixtures.js';
 import { FixedClock } from '../support/fixed-clock.js';
 import { connectTestDatabase, type TestDatabase } from './support/test-database.js';
+import { createTestAuthority } from '../support/test-authority.js';
 
-const headers = { 'x-merchant-id': MERCHANT_ID };
+const authority = await createTestAuthority();
+const headers = await authority.headersFor(MERCHANT_ID);
 
 describe('ledger HTTP API with PostgreSQL', () => {
   let testDatabase: TestDatabase;
@@ -24,6 +26,7 @@ describe('ledger HTTP API with PostgreSQL', () => {
         settings: { defaultTimeZone: 'America/Sao_Paulo', maxBackdatedDays: 30 },
         clock: new FixedClock(NOW),
       }),
+      security: authority.security(),
     });
   });
 

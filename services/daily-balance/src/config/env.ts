@@ -30,6 +30,11 @@ const apiSchema = processSchema.extend(databaseSchema.shape).extend({
   CACHE_TIMEOUT_MS: positiveInteger.default(100),
   CIRCUIT_FAILURE_THRESHOLD: positiveInteger.default(5),
   CIRCUIT_RESET_TIMEOUT_MS: positiveInteger.default(10_000),
+  AUTH_ISSUER: z.url(),
+  AUTH_JWKS_URL: z.url(),
+  AUTH_AUDIENCE: z.string().min(1).default('cash-flow-api'),
+  RATE_LIMIT_MAX: positiveInteger.default(1_200),
+  RATE_LIMIT_WINDOW_MS: positiveInteger.default(60_000),
 });
 
 const consumerSchema = processSchema
