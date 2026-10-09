@@ -13,16 +13,18 @@ flowchart LR
   C(["Comerciante"]) -->|HTTPS| L["ledger<br/>registro de lançamentos"]
   C -->|HTTPS| D["daily-balance<br/>saldo consolidado"]
   L --> LDB[("PostgreSQL<br/>ledger + outbox")]
-  L -. eventos .-> B{{"RabbitMQ"}}
+  O["ledger-outbox-relay"] -->|lê pendentes| LDB
+  O -. CloudEvents .-> B{{"RabbitMQ<br/>cash-flow.ledger.events"}}
   B -. eventos .-> D
   D --> DDB[("PostgreSQL<br/>daily_balance")]
   D --> R[("Redis")]
 ```
 
-| Serviço         | Responsabilidade                                                            | Porta local |
-| --------------- | --------------------------------------------------------------------------- | ----------- |
-| `ledger`        | Registrar, estornar e consultar lançamentos. Publica eventos via outbox.    | `3001`      |
-| `daily-balance` | Consumir eventos, manter o saldo diário materializado e servir o relatório. | `3002`      |
+| Serviço               | Responsabilidade                                                                                                                         | Porta local |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `ledger`              | Registrar, estornar e consultar lançamentos. Publica eventos via outbox.                                                                 | `3001`      |
+| `ledger-outbox-relay` | Ler o outbox e publicar os eventos no RabbitMQ. Processo separado da API: uma falha na publicação nunca afeta o registro de lançamentos. | `—`         |
+| `daily-balance`       | Consumir eventos, manter o saldo diário materializado e servir o relatório.                                                              | `3002`      |
 
 ## Justificativa das decisões de arquitetura e tecnologia
 
@@ -41,14 +43,18 @@ O requisito não funcional mais forte do desafio é que _o serviço de lançamen
 
 ### Padrões arquiteturais
 
-| Padrão                                     | Problema que resolve                                                                                                                                                                                                             |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Comunicação assíncrona por eventos         | O ledger não conhece nem espera o consolidado. Se o consolidado cair, os eventos ficam na fila e são processados quando ele voltar                                                                                               |
-| Transactional Outbox                       | Evita a escrita dupla (banco + broker). O lançamento e o evento são gravados na mesma transação; um relay publica depois. Nem o RabbitMQ fica no caminho crítico do registro                                                     |
-| CQRS com modelo de leitura materializado   | O saldo diário é atualizado a cada evento, não calculado na consulta. A leitura vira uma busca por chave primária com cache, o que torna 50 req/s trivial e mantém a perda de requisições bem abaixo dos 5% tolerados            |
-| Consumidor idempotente                     | A entrega é _at-least-once_. A deduplicação por `event_id` na mesma transação da atualização garante que um evento repetido não altere o saldo duas vezes                                                                        |
-| Arquitetura hexagonal (Ports and Adapters) | Regras de negócio isoladas de framework, banco e mensageria. Casos de uso dependem apenas de interfaces (ports), o que permite testar o domínio sem infraestrutura e trocar adapters (ex.: RabbitMQ por SQS) sem tocar no núcleo |
-| DDD tático                                 | Value objects garantem que nenhum dado inválido exista no domínio (`Money`, `BusinessDate`, `TimeZone`); o agregado `Entry` concentra as regras de estorno e emite os eventos de domínio                                         |
+| Padrão                                                   | Problema que resolve                                                                                                                                                                                                             |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Comunicação assíncrona por eventos                       | O ledger não conhece nem espera o consolidado. Se o consolidado cair, os eventos ficam na fila e são processados quando ele voltar                                                                                               |
+| Transactional Outbox                                     | Evita a escrita dupla (banco + broker). O lançamento e o evento são gravados na mesma transação; um relay publica depois. Nem o RabbitMQ fica no caminho crítico do registro                                                     |
+| CQRS com modelo de leitura materializado                 | O saldo diário é atualizado a cada evento, não calculado na consulta. A leitura vira uma busca por chave primária com cache, o que torna 50 req/s trivial e mantém a perda de requisições bem abaixo dos 5% tolerados            |
+| Consumidor idempotente                                   | A entrega é _at-least-once_. A deduplicação por `event_id` na mesma transação da atualização garante que um evento repetido não altere o saldo duas vezes                                                                        |
+| CloudEvents como envelope dos eventos                    | Especificação aberta (CNCF) para metadados de eventos: `id`, `source`, `type`, `time` e `subject` têm significado padronizado e são entendidos por ferramentas de mercado                                                        | Formato próprio, que exigiria documentar e manter cada campo de metadado                                              |
+| Pacote de contratos compartilhado (_published language_) | O ledger publica e o consolidado consome o mesmo schema TypeBox, versionado no nome do tipo (`.v1`). O pacote contém apenas schemas e validação, sem lógica de negócio, então não acopla os serviços                             | Schema registry (ex.: Confluent, Apicurio), mais adequado quando há muitos times e serviços; registrado como evolução |
+| Relay como processo separado                             | A API e o relay usam a mesma imagem, com comandos diferentes. Escalam e falham de forma independente: se o relay cair, a API continua registrando e o backlog fica no outbox                                                     | Relay como tarefa em background dentro da API, que compartilharia recursos e ciclo de vida                            |
+| Exchange `topic` com publicação `mandatory`              | O roteamento por padrão (`cashflow.ledger.entry.*.v1`) permite novos consumidores sem alterar o produtor; o `mandatory` garante que nenhum evento seja descartado silenciosamente por falta de fila                              | Alternate exchange, que preservaria a mensagem em uma fila de estacionamento, mas exigiria reprocessamento manual     |
+| Arquitetura hexagonal (Ports and Adapters)               | Regras de negócio isoladas de framework, banco e mensageria. Casos de uso dependem apenas de interfaces (ports), o que permite testar o domínio sem infraestrutura e trocar adapters (ex.: RabbitMQ por SQS) sem tocar no núcleo |
+| DDD tático                                               | Value objects garantem que nenhum dado inválido exista no domínio (`Money`, `BusinessDate`, `TimeZone`); o agregado `Entry` concentra as regras de estorno e emite os eventos de domínio                                         |
 
 ### Tecnologias
 
@@ -67,6 +73,8 @@ O requisito não funcional mais forte do desafio é que _o serviço de lançamen
 | Swagger UI (`@fastify/swagger`)            | Documentação navegável e sempre sincronizada com o código em `/docs`                                                                                                                                                   | Documentação manual, que diverge do código com o tempo                                                          |
 | UUID v7                                    | Identificadores ordenados no tempo: mantêm as inserções no índice B-tree próximas, ao contrário do UUID v4 aleatório                                                                                                   | UUID v4, IDs sequenciais do banco                                                                               |
 | Testcontainers                             | Testes de integração contra um PostgreSQL real e descartável, cobrindo constraints, transações e concorrência que um mock não reproduz                                                                                 | Banco em memória (SQLite, pg-mem), com comportamento diferente do PostgreSQL                                    |
+| amqplib 2.x                                | Cliente AMQP oficial da comunidade Node.js, com reconexão automática com backoff e jitter e suporte a publisher confirms                                                                                               | Bibliotecas de mais alto nível, que escondem o controle de confirmação e retorno de mensagens                   |
+| pino                                       | Logger estruturado em JSON de baixo custo, o mesmo usado internamente pelo Fastify                                                                                                                                     | Winston, mais lento e sem integração nativa com o Fastify                                                       |
 | Vitest                                     | Rápido, suporte nativo a ESM e TypeScript, cobertura com V8                                                                                                                                                            | Jest, que exige configuração adicional para ESM                                                                 |
 | ESLint + Prettier                          | Padronização automática e regras que reforçam Clean Code: complexidade ciclomática máxima de 8, no máximo 3 parâmetros por função, proibição de comentários inline                                                     | -                                                                                                               |
 | Docker + Docker Compose                    | Um único `Dockerfile` multi-stage para os dois serviços; imagem final só com dependências de produção e usuário não-root; ambiente local completo com um comando                                                       | -                                                                                                               |
@@ -113,6 +121,8 @@ O domínio é financeiro e transacional. Quase todas as garantias de que a solu�
 Cada serviço segue a mesma organização. As dependências apontam sempre para dentro: o domínio não conhece frameworks, banco ou mensageria.
 
 ```
+packages/contracts/           # contratos de eventos versionados (schemas e validação, sem lógica)
+
 services/<service>/
 ├─ src/
 │  ├─ domain/                 # entidades, value objects e regras de negócio puras
@@ -122,10 +132,12 @@ services/<service>/
 │  │     ├─ inbound/          # contratos que o mundo externo usa para acionar a aplicação
 │  │     └─ outbound/         # contratos que a aplicação usa (repositórios, publisher, cache)
 │  ├─ adapters/
-│  │  ├─ inbound/             # HTTP (Fastify), consumidores de fila
+│  │  ├─ inbound/             # HTTP (Fastify), consumidores de fila, workers de polling
 │  │  └─ outbound/            # PostgreSQL, RabbitMQ, Redis
 │  ├─ config/                 # leitura e validação de ambiente
-│  └─ main.ts                 # composition root: instancia adapters e injeta nos casos de uso
+│  ├─ container.ts            # composition root: instancia adapters e injeta nos casos de uso
+│  ├─ main.ts                 # inicialização da API
+│  └─ relay.ts                # inicialização do relay do outbox (somente no ledger)
 └─ test/                      # espelha a estrutura de src/
 ```
 
@@ -175,6 +187,7 @@ npm install
 cp services/ledger/.env.example services/ledger/.env
 docker compose up -d postgres-ledger postgres-daily-balance rabbitmq redis
 npm run dev -w services/ledger
+npm run dev:relay -w services/ledger
 npm run dev -w services/daily-balance
 ```
 
@@ -182,13 +195,13 @@ As migrations do banco são aplicadas automaticamente na inicialização do serv
 
 ### Testes
 
-| Tipo       | Comando                                    | O que cobre                                                                                                      |
-| ---------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| Unidade    | `npm test`                                 | Domínio, casos de uso e rotas HTTP com adapters em memória; não exige infraestrutura                             |
-| Integração | `npm run test:integration`                 | Repositórios, outbox, migrations, idempotência e API contra um PostgreSQL real via Testcontainers (exige Docker) |
-| Cobertura  | `npm run test:coverage -w services/ledger` | Relatório de cobertura dos testes de unidade                                                                     |
+| Tipo       | Comando                                    | O que cobre                                                                                                                      |
+| ---------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| Unidade    | `npm test`                                 | Domínio, casos de uso e rotas HTTP com adapters em memória; não exige infraestrutura                                             |
+| Integração | `npm run test:integration`                 | Repositórios, outbox, migrations, idempotência, API e relay contra PostgreSQL e RabbitMQ reais via Testcontainers (exige Docker) |
+| Cobertura  | `npm run test:coverage -w services/ledger` | Relatório de cobertura dos testes de unidade                                                                                     |
 
-Os testes de integração verificam inclusive cenários de concorrência: duas requisições simultâneas com a mesma chave de idempotência gravam um único lançamento, e dois estornos simultâneos do mesmo lançamento resultam em um sucesso e um conflito.
+Os testes de integração verificam inclusive cenários de concorrência e falha: duas requisições simultâneas com a mesma chave de idempotência gravam um único lançamento; dois estornos simultâneos resultam em um sucesso e um conflito; três relays em paralelo publicam cada evento exatamente uma vez; e um evento sem fila de destino fica pendente com nova tentativa agendada, sem bloquear os demais.
 
 ### Comandos
 
@@ -283,6 +296,51 @@ Todas as respostas de erro seguem o padrão [Problem Details (RFC 9457)](https:/
 | 422    | `IDEMPOTENCY_KEY_REUSED`     | Chave de idempotência reutilizada com outra requisição         |
 | 500    | `INTERNAL_ERROR`             | Erro inesperado (detalhes apenas no log)                       |
 
+## Eventos de integração
+
+O ledger publica seus eventos no exchange `cash-flow.ledger.events` (tipo `topic`, durável) do RabbitMQ. O contrato é versionado e fica no pacote compartilhado [`packages/contracts`](packages/contracts), que também expõe o validador usado pelos consumidores.
+
+| Tipo (routing key)                  | Quando                     | Campos de `data`                                                                                   |
+| ----------------------------------- | -------------------------- | -------------------------------------------------------------------------------------------------- |
+| `cashflow.ledger.entry.recorded.v1` | Um lançamento é registrado | `entryId`, `merchantId`, `pointOfSaleId`, `entryType`, `amountInCents`, `currency`, `businessDate` |
+| `cashflow.ledger.entry.reversed.v1` | Um lançamento é estornado  | Os mesmos campos do estorno, mais `reversedEntryId`                                                |
+
+Consumidores podem se inscrever em todos os eventos de lançamento com o binding `cashflow.ledger.entry.*.v1`.
+
+Exemplo de mensagem ([CloudEvents 1.0](https://cloudevents.io), `content-type: application/cloudevents+json`):
+
+```json
+{
+  "specversion": "1.0",
+  "id": "01a12170-5d59-70fd-b181-3c8a5960d348",
+  "source": "/cash-flow/ledger",
+  "type": "cashflow.ledger.entry.recorded.v1",
+  "subject": "0b9f8e7d-6c5b-4a49-8382-716051403928",
+  "time": "2026-10-09T15:00:00.000Z",
+  "datacontenttype": "application/json",
+  "data": {
+    "entryId": "0b9f8e7d-6c5b-4a49-8382-716051403928",
+    "merchantId": "6f1c2a5e-8d4b-4c3a-9e2f-1a2b3c4d5e6f",
+    "pointOfSaleId": null,
+    "entryType": "CREDIT",
+    "amountInCents": 15990,
+    "currency": "BRL",
+    "businessDate": "2026-10-09"
+  }
+}
+```
+
+### Garantias de entrega
+
+| Garantia                                         | Como é obtida                                                                                                                                                                    |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Nenhum evento é perdido                          | O evento é gravado no outbox na mesma transação do lançamento; o relay só marca como publicado após a confirmação do broker (publisher confirms) e as mensagens são persistentes |
+| Entrega pelo menos uma vez (_at-least-once_)     | Se o relay cair entre publicar e marcar, o evento é publicado novamente. O `id` do CloudEvent (também enviado como `messageId`) permite que o consumidor descarte duplicatas     |
+| Sem perda por falta de consumidor                | As mensagens são publicadas com `mandatory`: se nenhuma fila estiver ligada ao exchange, o broker devolve a mensagem e ela continua pendente no outbox                           |
+| Uma mensagem problemática não bloqueia as demais | Rejeições por mensagem recebem backoff exponencial próprio (`attempts`, `last_error`, `next_attempt_at`), de 1 s até 5 min, enquanto o restante do lote segue normalmente        |
+| Indisponibilidade do broker não afeta o registro | O ledger não conhece o RabbitMQ. O relay reconecta automaticamente com backoff; durante a queda os eventos acumulam no outbox e são publicados quando o broker volta             |
+| Ordem                                            | Não garantida, e não é necessária: o consolidado soma valores, e a soma é comutativa                                                                                             |
+
 ## Regras de negócio do ledger
 
 | Regra               | Descrição                                                                                                                                                                                                                                                                                                                 |
@@ -308,8 +366,8 @@ Cada lançamento registrado gera um evento de domínio (`EntryRecorded` ou `Entr
 | 0    | **Fundação**: monorepo com workspaces, TypeScript, lint, testes, Dockerfile multi-stage, Docker Compose com a infraestrutura, health checks, README                                  | ✅ Concluída |
 | 1    | **Domínio do ledger**: entidade de lançamento, value objects (dinheiro em centavos, tipo, data de competência), estorno, casos de uso e ports, testes unitários                      | ✅ Concluída |
 | 2    | **Adapters do ledger**: API HTTP, repositório PostgreSQL, migrations, idempotência (`Idempotency-Key`), tabela de outbox na mesma transação, testes de integração com Testcontainers | ✅ Concluída |
-| 3    | **Publicação de eventos**: contrato versionado dos eventos, outbox relay com `FOR UPDATE SKIP LOCKED`, publisher RabbitMQ, exchange e filas com DLQ                                  | ⏳ Próxima   |
-| 4    | **Consolidação diária**: domínio do saldo diário, consumidor idempotente por `event_id`, UPSERT aditivo, retentativas e DLQ, reprocessamento de um dia                               | Pendente     |
+| 3    | **Publicação de eventos**: contrato versionado dos eventos, outbox relay com `FOR UPDATE SKIP LOCKED`, publisher RabbitMQ, exchange e filas com DLQ                                  | ✅ Concluída |
+| 4    | **Consolidação diária**: domínio do saldo diário, consumidor idempotente por `event_id`, UPSERT aditivo, retentativas e DLQ, reprocessamento de um dia                               | ⏳ Próxima   |
 | 5    | **API do consolidado**: consulta por dia e por período, saldo acumulado, cache Redis com fallback para o banco e circuit breaker                                                     | Pendente     |
 | 6    | **Segurança**: Keycloak (OIDC), validação de JWT, escopos, `merchant_id` vindo do token, rate limiting, headers de segurança                                                         | Pendente     |
 | 7    | **Observabilidade**: OpenTelemetry (traces, métricas, logs), correlation id ponta a ponta, Prometheus, Grafana, Tempo e Loki, dashboards e alertas                                   | Pendente     |

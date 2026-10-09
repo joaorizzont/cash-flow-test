@@ -3,10 +3,10 @@ import { ledgerMigrations } from './adapters/outbound/postgres/migrations/index.
 import { createPool, PostgresDatabase } from './adapters/outbound/postgres/postgres-database.js';
 import { PostgresHealthIndicator } from './adapters/outbound/postgres/postgres-health-indicator.js';
 import { PostgresMigrator } from './adapters/outbound/postgres/postgres-migrator.js';
-import { loadEnv } from './config/env.js';
+import { loadApiEnv } from './config/env.js';
 import { createLedgerApi } from './container.js';
 
-const env = loadEnv();
+const env = loadApiEnv();
 
 const pool = createPool({
   connectionString: env.DATABASE_URL,

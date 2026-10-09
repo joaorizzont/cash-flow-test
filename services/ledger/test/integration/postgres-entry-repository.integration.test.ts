@@ -1,3 +1,4 @@
+import { isLedgerEventV1 } from '@cash-flow/contracts';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { OutboxWriter } from '../../src/adapters/outbound/postgres/outbox-writer.js';
 import { PostgresEntryRepository } from '../../src/adapters/outbound/postgres/postgres-entry-repository.js';
@@ -70,27 +71,28 @@ describe('PostgresEntryRepository', () => {
     expect(toEntryView(restored as Entry)).toEqual(toEntryView(entry));
   });
 
-  it('writes the domain event to the outbox with the entry', async () => {
+  it('writes the domain event to the outbox as a v1 contract event with the entry', async () => {
     await repository.save(recordedEntry());
 
     const result = await testDatabase.pool.query(
-      'SELECT aggregate_id, event_type, payload, published_at FROM outbox',
+      'SELECT id, aggregate_id, event_type, payload, published_at FROM outbox',
     );
+    const [row] = result.rows;
 
-    expect(result.rows).toEqual([
-      {
-        aggregate_id: ENTRY_ID,
-        event_type: 'EntryRecorded',
-        published_at: null,
-        payload: expect.objectContaining({
-          name: 'EntryRecorded',
-          entryId: ENTRY_ID,
-          amountInCents: 15_990,
-          businessDate: '2026-10-09',
-          occurredAt: '2026-10-09T15:00:00.000Z',
-        }),
-      },
-    ]);
+    expect(result.rows).toHaveLength(1);
+    expect(row).toMatchObject({
+      aggregate_id: ENTRY_ID,
+      event_type: 'cashflow.ledger.entry.recorded.v1',
+      published_at: null,
+    });
+    expect(isLedgerEventV1(row.payload)).toBe(true);
+    expect(row.payload).toMatchObject({
+      id: row.id,
+      type: 'cashflow.ledger.entry.recorded.v1',
+      subject: ENTRY_ID,
+      time: '2026-10-09T15:00:00.000Z',
+      data: { entryId: ENTRY_ID, amountInCents: 15_990, businessDate: '2026-10-09' },
+    });
   });
 
   it('rolls back the entry and its event when the transaction fails', async () => {
