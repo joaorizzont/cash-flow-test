@@ -256,13 +256,21 @@ Todos os cenários abaixo foram executados derrubando componentes com o ambiente
 
 Testes automatizados com [k6](https://k6.io), em um MacBook Air M1 com todos os containers na mesma máquina:
 
-| Teste                                                  | Comando                                                                                                                                | Resultado                                                                 |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| Lançamentos a 10 req/s com o consolidado fora por 30 s | `npm run test:resilience`                                                                                                              | 900 gravados, 0 falhas, 900 de 900 consolidados, totais iguais ao centavo |
-| Pico de 50 req/s por 2 minutos                         | `npm run test:load`                                                                                                                    | 6.001 requisições, 0% de falhas, p95 de 6,5 ms                            |
-| Pico com o Redis fora por 30 s                         | `npm run test:resilience:redis`                                                                                                        | 0% de falhas, p95 de 22 ms                                                |
-| Pico com o banco do consolidado fora por 30 s          | `npm run test:resilience:database`                                                                                                     | 0% de falhas, p95 de 8,3 ms                                               |
-| Estresse com uma única réplica                         | `RATE=400` no teste de carga, com `DAILY_BALANCE_RATE_LIMIT_MAX=1000000` ao subir o consolidado para desativar o limite de requisições | 0% de falhas a 400 req/s (8× o pico), p95 de 20,9 ms                      |
+| Teste                                                  | Comando                            | Resultado                                                                 |
+| ------------------------------------------------------ | ---------------------------------- | ------------------------------------------------------------------------- |
+| Lançamentos a 10 req/s com o consolidado fora por 30 s | `npm run test:resilience`          | 900 gravados, 0 falhas, 900 de 900 consolidados, totais iguais ao centavo |
+| Pico de 50 req/s por 2 minutos                         | `npm run test:load`                | 6.001 requisições, 0% de falhas, p95 de 6,5 ms                            |
+| Pico com o Redis fora por 30 s                         | `npm run test:resilience:redis`    | 0% de falhas, p95 de 22 ms                                                |
+| Pico com o banco do consolidado fora por 30 s          | `npm run test:resilience:database` | 0% de falhas, p95 de 8,3 ms                                               |
+| Estresse com uma única réplica                         | Ver abaixo                         | 0% de falhas a 400 req/s (8× o pico), p95 de 20,9 ms                      |
+
+Para o teste de estresse, o limite de requisições por comerciante (100 req/s) é desativado só durante a medição:
+
+```bash
+DAILY_BALANCE_RATE_LIMIT_MAX=1000000 docker compose up -d daily-balance
+docker compose run --rm -e RATE=400 -e DURATION=60s k6 run /scripts/load/daily-balance-peak.js
+docker compose up -d daily-balance
+```
 
 ## Arquitetura de transição
 
