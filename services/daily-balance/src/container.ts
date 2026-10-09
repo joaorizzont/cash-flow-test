@@ -14,6 +14,7 @@ import {
   CircuitBreaker,
   type CircuitState,
 } from './adapters/outbound/resilience/circuit-breaker.js';
+import { CircuitBreakerMetrics } from './adapters/outbound/resilience/circuit-breaker-metrics.js';
 import { CircuitBreakingReadModel } from './adapters/outbound/resilience/circuit-breaking-read-model.js';
 import { SystemClock } from './adapters/outbound/system/system-clock.js';
 import {
@@ -69,16 +70,23 @@ export const createDailyBalanceApi = (
 ): DailyBalanceApi => {
   const { database, cacheClient, settings, logger } = dependencies;
   const clock = dependencies.clock ?? new SystemClock();
-  const breakerFor = (name: string, callTimeoutMs: number): CircuitBreaker =>
-    new CircuitBreaker({
+  const breakerMetrics = new CircuitBreakerMetrics();
+  const onStateChange = (circuit: string, state: CircuitState): void => {
+    logger.warn({ circuit, state }, 'circuit breaker state changed');
+    breakerMetrics.transitioned(circuit, state);
+  };
+  const breakerFor = (name: string, callTimeoutMs: number): CircuitBreaker => {
+    const breaker = new CircuitBreaker({
       name,
       callTimeoutMs,
       failureThreshold: settings.circuitFailureThreshold,
       resetTimeoutMs: settings.circuitResetTimeoutMs,
       clock,
-      onStateChange: (circuit: string, state: CircuitState) =>
-        logger.warn({ circuit, state }, 'circuit breaker state changed'),
+      onStateChange,
     });
+    breakerMetrics.watch(name, breaker);
+    return breaker;
+  };
 
   const readModel = new CircuitBreakingReadModel(
     new PostgresDailyBalanceReadModel(database),

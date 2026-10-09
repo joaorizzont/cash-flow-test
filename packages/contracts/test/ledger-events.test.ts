@@ -54,8 +54,19 @@ describe('ledger events v1', () => {
     ],
     ['unexpected field', { ...recorded, data: { ...recorded.data, note: 'x' } }],
     ['missing id', { ...recorded, id: undefined }],
+    ['malformed traceparent', { ...recorded, traceparent: 'not-a-trace' }],
   ])('rejects an event with %s', (_case, event) => {
     expect(isLedgerEventV1(event)).toBe(false);
+  });
+
+  it('accepts the distributed tracing extension attributes', () => {
+    const traced = {
+      ...recorded,
+      traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+      tracestate: 'vendor=value',
+    };
+
+    expect(isLedgerEventV1(traced)).toBe(true);
   });
 
   it('describes validation errors', () => {

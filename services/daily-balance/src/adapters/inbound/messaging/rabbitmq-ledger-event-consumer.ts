@@ -13,6 +13,7 @@ import {
   LAST_ERROR_HEADER,
   republishOptionsOf,
 } from './delivery-headers.js';
+import { ConsumerMetrics } from './consumer-metrics.js';
 import type { HandlingOutcome, LedgerMessageHandler } from './ledger-message-handler.js';
 
 export interface LedgerEventConsumerOptions {
@@ -22,6 +23,7 @@ export interface LedgerEventConsumerOptions {
   readonly prefetch: number;
   readonly retryDelayMs: number;
   readonly logger: Logger;
+  readonly metrics?: ConsumerMetrics;
 }
 
 const RESUBSCRIBE_DELAY_MS = 1_000;
@@ -38,8 +40,11 @@ export class RabbitMqLedgerEventConsumer {
   private subscription: Promise<void> | null = null;
   private stopped = false;
   private readonly inFlight = new Set<Promise<void>>();
+  private readonly metrics: ConsumerMetrics;
 
-  constructor(private readonly options: LedgerEventConsumerOptions) {}
+  constructor(private readonly options: LedgerEventConsumerOptions) {
+    this.metrics = options.metrics ?? new ConsumerMetrics();
+  }
 
   start(): void {
     this.resubscribe();
@@ -126,6 +131,7 @@ export class RabbitMqLedgerEventConsumer {
       attempt: delivery.attempt,
     });
     await this.settle(delivery, outcome);
+    this.metrics.record(outcome);
   }
 
   private async settle(delivery: Delivery, outcome: HandlingOutcome): Promise<void> {

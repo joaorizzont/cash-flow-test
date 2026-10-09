@@ -9,6 +9,7 @@ import { entryRoutes } from './routes/entry-routes.js';
 import { registerHealthRoutes } from './routes/health-routes.js';
 import { pointOfSaleRoutes } from './routes/point-of-sale-routes.js';
 import { ProblemSchema } from './schemas/common-schemas.js';
+import { registerTraceHeaders } from './trace-headers.js';
 import {
   BEARER_SECURITY_SCHEME,
   registerHttpSecurity,
@@ -42,6 +43,7 @@ export const buildHttpServer = async (options: HttpServerOptions): Promise<Fasti
   app.addSchema(ProblemSchema);
   app.setErrorHandler(handleError);
   app.setNotFoundHandler(handleNotFound);
+  registerTraceHeaders(app);
 
   await registerHttpSecurity(app, options.security);
   await app.register(swagger, {

@@ -1,4 +1,5 @@
 import type { FastifyPluginAsyncTypebox } from '@fastify/type-provider-typebox';
+import { EntryMetrics } from '../entry-metrics.js';
 import { idempotentRequestOf } from '../idempotency.js';
 import type { LedgerApi } from '../ledger-api.js';
 import { IdempotentHeadersSchema, problemResponses } from '../schemas/common-schemas.js';
@@ -18,9 +19,10 @@ const REPLAYED_HEADER = 'idempotent-replayed';
 
 const locationOf = (entryId: string): string => `/v1/entries/${entryId}`;
 
-export const entryRoutes =
-  (api: LedgerApi): FastifyPluginAsyncTypebox =>
-  async (app) => {
+export const entryRoutes = (api: LedgerApi): FastifyPluginAsyncTypebox =>
+  async function entryRoutes(app) {
+    const entryMetrics = new EntryMetrics();
+
     app.post(
       '/v1/entries',
       {
@@ -39,6 +41,9 @@ export const entryRoutes =
           idempotentRequestOf(request, { name: 'record-entry', merchantId }),
           () => api.recordEntry.execute({ ...request.body, merchantId }),
         );
+        if (!result.replayed) {
+          entryMetrics.record(result.value);
+        }
         return reply
           .code(201)
           .header('location', locationOf(result.value.id))
@@ -74,6 +79,9 @@ export const entryRoutes =
               reason: request.body.reason,
             }),
         );
+        if (!result.replayed) {
+          entryMetrics.record(result.value);
+        }
         return reply
           .code(201)
           .header('location', locationOf(result.value.id))

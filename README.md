@@ -91,6 +91,7 @@ O custo é mais interfaces e mais arquivos do que uma organização em camadas s
 | CloudEvents como envelope dos eventos                              | Especificação aberta (CNCF) para metadados de eventos: `id`, `source`, `type`, `time` e `subject` têm significado padronizado e são entendidos por ferramentas de mercado                                                                                                                                       | Formato próprio, que exigiria documentar e manter cada campo de metadado                                              |
 | Pacote de contratos compartilhado (_published language_)           | O ledger publica e o consolidado consome o mesmo schema TypeBox, versionado no nome do tipo (`.v1`). O pacote contém apenas schemas e validação, sem lógica de negócio, então não acopla os serviços                                                                                                            | Schema registry (ex.: Confluent, Apicurio), mais adequado quando há muitos times e serviços; registrado como evolução |
 | Relay como processo separado                                       | A API e o relay usam a mesma imagem, com comandos diferentes. Escalam e falham de forma independente: se o relay cair, a API continua registrando e o backlog fica no outbox                                                                                                                                    | Relay como tarefa em background dentro da API, que compartilharia recursos e ciclo de vida                            |
+| Contexto de trace propagado pelo outbox                            | O `traceparent` da requisição é gravado no CloudEvent (extensão Distributed Tracing). O relay publica dentro desse contexto e o consumidor continua o mesmo trace: um lançamento pode ser seguido do `POST` até o saldo atualizado. Detalhes em [Observabilidade](#observabilidade)                             | Correlation id próprio em header, que não se integraria às ferramentas de tracing                                     |
 | Relay por polling com `FOR UPDATE SKIP LOCKED`                     | Um worker consulta o outbox a cada 500 ms (ou imediatamente enquanto houver backlog). O `SKIP LOCKED` permite várias réplicas sem publicação duplicada, sem precisar de lock distribuído. Detalhes em [Como o relay do outbox funciona](#como-o-relay-do-outbox-funciona)                                       | `LISTEN/NOTIFY` ou CDC com Debezium, com menor latência porém mais complexidade; registrados como evolução            |
 | Exchange `topic` com publicação `mandatory`                        | O roteamento por padrão (`cashflow.ledger.entry.*.v1`) permite novos consumidores sem alterar o produtor; o `mandatory` garante que nenhum evento seja descartado silenciosamente por falta de fila                                                                                                             | Alternate exchange, que preservaria a mensagem em uma fila de estacionamento, mas exigiria reprocessamento manual     |
 | Arquitetura hexagonal (Ports and Adapters)                         | Regras de negócio isoladas de framework, banco e mensageria. Casos de uso dependem apenas de interfaces (ports), o que permite testar o domínio sem infraestrutura e trocar adapters (ex.: RabbitMQ por SQS) sem tocar no núcleo                                                                                |
@@ -113,6 +114,8 @@ O custo é mais interfaces e mais arquivos do que uma organização em camadas s
 | TypeBox + `@fastify/type-provider-typebox`   | Um único schema valida a requisição, tipa o handler em TypeScript e gera a documentação OpenAPI, sem duplicar contratos                                                                                                          | Zod nas rotas, que exigiria conversão adicional para JSON Schema                                                |
 | Swagger UI (`@fastify/swagger`)              | Documentação navegável e sempre sincronizada com o código em `/docs`                                                                                                                                                             | Documentação manual, que diverge do código com o tempo                                                          |
 | UUID v7                                      | Identificadores ordenados no tempo: mantêm as inserções no índice B-tree próximas, ao contrário do UUID v4 aleatório                                                                                                             | UUID v4, IDs sequenciais do banco                                                                               |
+| OpenTelemetry + Collector                    | Padrão aberto para traces, métricas e logs, com instrumentação automática de HTTP, Fastify, PostgreSQL, RabbitMQ, Redis e pino. O Collector desacopla os serviços dos backends                                                   | SDKs proprietários (Datadog, New Relic), que prenderiam o código a um fornecedor                                |
+| Prometheus, Tempo, Loki e Grafana            | Stack open source que roda localmente e cobre os três sinais com correlação entre eles (log → trace → logs)                                                                                                                      | Elastic Stack (mais pesado para rodar localmente); serviços gerenciados equivalentes na nuvem                   |
 | Keycloak 26                                  | Provedor OIDC open source e maduro, que roda localmente com um comando e tem o realm versionado como código (clientes, escopos, papéis, mapeamento de claims e usuários)                                                         | Auth0 ou Cognito (gerenciados, mas sem execução local); implementar a emissão de tokens no próprio serviço      |
 | `jose`                                       | Validação de JWT e JWKS sem dependências nativas, com cache e tempo limite na busca de chaves; usada também nos testes para assinar tokens com chaves geradas na hora                                                            | `jsonwebtoken` + `jwks-rsa`, duas bibliotecas para o mesmo papel                                                |
 | `@fastify/rate-limit` e `@fastify/helmet`    | Plugins oficiais do Fastify para limite de requisições e headers de segurança                                                                                                                                                    | Implementação própria                                                                                           |
@@ -184,6 +187,7 @@ services/<service>/
 │  ├─ container.ts            # composition root: instancia adapters e injeta nos casos de uso
 │  ├─ main.ts                 # inicialização da API
 │  ├─ relay.ts                # inicialização do relay do outbox (somente no ledger)
+│  ├─ telemetry.ts            # OpenTelemetry, carregado com --import antes da aplicação
 │  ├─ consumer.ts             # inicialização do consumidor de eventos (somente no daily-balance)
 │  ├─ rebuild-day.ts          # comando de reconstrução do saldo de um dia (somente no daily-balance)
 │  └─ redrive-dead-letters.ts # comando que devolve mensagens da DLQ à fila (somente no daily-balance)
@@ -221,6 +225,8 @@ curl http://localhost:3002/health/ready
 | PostgreSQL ledger        | `localhost:5432`                                              |
 | PostgreSQL daily-balance | `localhost:5433`                                              |
 | Redis                    | `localhost:6379`                                              |
+| Grafana                  | http://localhost:3000 (dashboard **Cash Flow**)               |
+| Prometheus               | http://localhost:9090                                         |
 
 Para parar e remover os volumes:
 
@@ -685,6 +691,131 @@ Como os tokens são validados localmente, o Keycloak não está no caminho de ca
 | Keycloak      | Modo produção (`start`), banco próprio, alta disponibilidade e fluxo de senha desabilitado                                                                                                       |
 | Rede          | Bancos, RabbitMQ e Redis em sub-redes privadas, acessíveis apenas pelos serviços                                                                                                                 |
 
+## Observabilidade
+
+Os quatro processos são instrumentados com **OpenTelemetry** e enviam traces, métricas e logs, via OTLP, para um **OpenTelemetry Collector**. O Collector distribui cada sinal para seu backend, e o **Grafana** reúne os três.
+
+```mermaid
+flowchart LR
+  subgraph Serviços
+    L[ledger]
+    R[ledger-outbox-relay]
+    D[daily-balance]
+    C[daily-balance-consumer]
+  end
+  L & R & D & C -->|OTLP| OC[OpenTelemetry Collector]
+  OC -->|traces| T[(Tempo)]
+  OC -->|métricas| P[(Prometheus)]
+  OC -->|logs| LK[(Loki)]
+  MQ[RabbitMQ] -->|profundidade das filas| P
+  P -->|regras de alerta| P
+  G[Grafana] --> T & P & LK
+```
+
+| Recurso    | Endereço              | Uso                                                                  |
+| ---------- | --------------------- | -------------------------------------------------------------------- |
+| Grafana    | http://localhost:3000 | Dashboard **Cash Flow** (página inicial), Explore para traces e logs |
+| Prometheus | http://localhost:9090 | Consultas PromQL e alertas (menu _Alerts_)                           |
+
+### Trace ponta a ponta
+
+O trace de um lançamento atravessa os três processos envolvidos, mesmo com o outbox no meio. Ao gravar o evento, o ledger guarda no próprio CloudEvent o contexto do trace da requisição (atributos `traceparent` e `tracestate`, da extensão [Distributed Tracing](https://github.com/cloudevents/spec/blob/main/cloudevents/extensions/distributed-tracing.md) da especificação CloudEvents). O relay publica a mensagem dentro desse contexto, e o consumidor continua o mesmo trace.
+
+Trace real capturado no ambiente local (um único `trace_id`):
+
+```
+ledger                   POST /v1/entries
+ledger                     pg.query:INSERT ledger            (lançamento)
+ledger                     pg.query:INSERT ledger            (outbox)
+ledger-outbox-relay        publish cash-flow.ledger.events
+daily-balance-consumer     daily-balance.ledger-events process
+daily-balance-consumer       pg.query:INSERT daily_balance   (diário de movimentos)
+daily-balance-consumer       pg.query:INSERT daily_balance   (UPSERT aditivo do saldo)
+```
+
+O intervalo entre o commit no ledger e a publicação mostra, no próprio trace, o tempo que o evento passou no outbox.
+
+### Correlação
+
+| Onde          | Como                                                                                                                                                 |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Resposta HTTP | Header `x-trace-id` em todas as respostas. Um cliente que reportar um erro informa esse id, e o trace completo é aberto no Grafana (Explore → Tempo) |
+| Logs          | Cada linha de log (pino) carrega `trace_id` e `span_id`. No Loki, um link leva do log ao trace                                                       |
+| Traces        | No Tempo, um link leva do span aos logs do mesmo trace no Loki                                                                                       |
+| Eventos       | Atributo `traceparent` no CloudEvent; o `id` do evento também é o `messageId` da mensagem no RabbitMQ                                                |
+
+### Métricas
+
+Além das métricas HTTP geradas pela instrumentação (`http.server.request.duration`, com rota, método e status), cada serviço publica métricas próprias:
+
+| Métrica (Prometheus)                         | Tipo       | Processo               | O que mostra                                                            |
+| -------------------------------------------- | ---------- | ---------------------- | ----------------------------------------------------------------------- |
+| `cashflow_entries_recorded_total`            | contador   | ledger                 | Lançamentos registrados, por tipo e se é estorno                        |
+| `cashflow_outbox_pending`                    | gauge      | ledger-outbox-relay    | Eventos aguardando publicação                                           |
+| `cashflow_outbox_lag_seconds`                | gauge      | ledger-outbox-relay    | Idade do evento pendente mais antigo                                    |
+| `cashflow_outbox_published_total`            | contador   | ledger-outbox-relay    | Eventos publicados                                                      |
+| `cashflow_outbox_rejected_total`             | contador   | ledger-outbox-relay    | Eventos rejeitados pelo broker (agendados para nova tentativa)          |
+| `cashflow_consumer_messages_total`           | contador   | daily-balance-consumer | Mensagens por resultado: `applied`, `duplicate`, `retry`, `dead_letter` |
+| `cashflow_consolidation_lag_seconds`         | histograma | daily-balance-consumer | Tempo do registro do lançamento até sua entrada no saldo diário         |
+| `cashflow_balance_report_requests_total`     | contador   | daily-balance          | Respostas do relatório por origem: `hit`, `miss`, `stale`               |
+| `cashflow_circuit_breaker_state`             | gauge      | daily-balance          | Estado de cada circuito: 0 fechado, 1 semiaberto, 2 aberto              |
+| `cashflow_circuit_breaker_transitions_total` | contador   | daily-balance          | Mudanças de estado dos circuitos                                        |
+| `cashflow_service_up`                        | gauge      | todos                  | Sinal de vida do processo                                               |
+| `rabbitmq_detailed_queue_messages`           | gauge      | RabbitMQ               | Mensagens em cada fila, inclusive a DLQ                                 |
+
+Medição local com carga mista (cerca de 25 req/s por 60 s, 80% consultas e 20% lançamentos): atraso da consolidação de **0,26 s na mediana e 0,5 s no p95**, latência p95 de 9,5 ms no consolidado e 24 ms no registro de lançamentos.
+
+### Dashboard
+
+O dashboard **Cash Flow** é provisionado automaticamente e abre como página inicial do Grafana:
+
+| Linha               | Painéis                                                                                                                                                                 |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Visão geral         | Lançamentos por minuto, taxa de sucesso do consolidado (comparada ao limite de 5% de perda), latência p95, atraso da consolidação, eventos no outbox e mensagens na DLQ |
+| Ledger              | Requisições por rota e status, latência p50 e p95 por rota, lançamentos registrados                                                                                     |
+| API do consolidado  | Requisições, latência p50, p95 e p99, origem das respostas (cache, banco ou dado obsoleto) e estado dos circuit breakers                                                |
+| Pipeline de eventos | Outbox (pendentes e idade), publicação do relay, resultado do consumidor, atraso da consolidação, profundidade das filas e logs de avisos e erros                       |
+
+### Alertas
+
+As regras ficam em [`infra/prometheus/alerts.yml`](infra/prometheus/alerts.yml) e podem ser vistas em http://localhost:9090/alerts.
+
+| Alerta                               | Severidade | Dispara quando                                                                  |
+| ------------------------------------ | ---------- | ------------------------------------------------------------------------------- |
+| `DailyBalanceRequestLossAboveBudget` | crítica    | Mais de 5% das requisições ao consolidado falham (`5xx` ou `429`) por 2 minutos |
+| `LedgerErrorRateHigh`                | crítica    | Mais de 1% das requisições ao ledger falham por 5 minutos                       |
+| `DailyBalanceLatencyHigh`            | aviso      | Latência p95 do consolidado acima de 500 ms por 5 minutos                       |
+| `OutboxLagHigh`                      | aviso      | Um evento espera mais de 1 minuto para ser publicado                            |
+| `ConsolidationLagHigh`               | aviso      | p95 do atraso da consolidação acima de 30 s                                     |
+| `ConsumerBacklogGrowing`             | aviso      | Mais de 1.000 mensagens aguardando na fila do consolidado                       |
+| `DeadLetterQueueNotEmpty`            | crítica    | Há mensagens na DLQ (o saldo está incompleto até o redrive)                     |
+| `CircuitBreakerOpen`                 | aviso      | Um circuito está aberto há mais de 1 minuto                                     |
+| `StaleBalanceReportsServed`          | aviso      | O consolidado está respondendo com dados obsoletos                              |
+| `ServiceNotReportingTelemetry`       | crítica    | Um processo parou de enviar telemetria                                          |
+
+Os alertas `DeadLetterQueueNotEmpty` e `ServiceNotReportingTelemetry` foram verificados no ambiente local: publicando uma mensagem inválida e parando o consumidor, respectivamente. Em produção, o Prometheus enviaria os alertas a um Alertmanager (e-mail, Slack, PagerDuty); localmente eles ficam visíveis na interface do Prometheus.
+
+### Decisões
+
+| Decisão                                       | Justificativa                                                                                                                                                                                      |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenTelemetry nos serviços, Collector no meio | Instrumentação padrão de mercado e neutra em relação a fornecedor. Os serviços só conhecem OTLP; trocar Tempo, Loki ou Prometheus por Datadog, New Relic ou CloudWatch é configuração do Collector |
+| Telemetria carregada antes da aplicação       | `node --import ./dist/telemetry.js` registra a instrumentação antes de qualquer módulo ser carregado. Sem `OTEL_EXPORTER_OTLP_ENDPOINT`, nada é iniciado (testes e desenvolvimento sem a stack)    |
+| Contexto do trace dentro do evento            | O outbox desacopla o registro da publicação, então o contexto da requisição não chegaria ao relay. Guardá-lo no CloudEvent, seguindo a extensão oficial, mantém o trace inteiro                    |
+| Sem ruído nos traces                          | Health checks e documentação não geram spans; consultas ao banco só geram spans dentro de uma operação. O polling do relay a cada 500 ms não gera traces vazios                                    |
+| Métricas de negócio nos adapters              | Contadores e histogramas ficam nos adapters (HTTP, consumidor, relay). O domínio e os casos de uso não dependem de OpenTelemetry                                                                   |
+| Logs pelo OTLP, não por arquivo               | O pino continua escrevendo JSON no stdout e a instrumentação envia cada linha também ao Collector, já com `trace_id`. Não é preciso coletar arquivos de log dos containers                         |
+| Profundidade das filas pelo próprio RabbitMQ  | O plugin `rabbitmq_prometheus` já expõe as filas, inclusive a DLQ, sem código adicional                                                                                                            |
+
+### Em produção
+
+| Item          | Recomendação                                                                                                                                                                                     |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Amostragem    | Hoje 100% dos traces são registrados. Em produção, amostragem por proporção (`OTEL_TRACES_SAMPLER=parentbased_traceidratio`) ou _tail sampling_ no Collector, mantendo sempre os traces com erro |
+| Retenção      | Tempo e Loki com armazenamento em objeto (S3); Prometheus com armazenamento de longo prazo (Mimir, Thanos ou Amazon Managed Prometheus)                                                          |
+| Alertas       | Alertmanager com rotas por severidade e runbooks vinculados a cada alerta                                                                                                                        |
+| Cardinalidade | Rótulos limitados a valores de baixa cardinalidade (rota, status, resultado); `merchant_id` nunca é rótulo de métrica                                                                            |
+
 ## Resiliência
 
 Resumo do comportamento do sistema diante de cada falha. Todos os cenários abaixo foram executados com o ambiente do Docker Compose, derrubando o componente com `docker compose stop`, e os principais também são cobertos por testes de integração.
@@ -724,8 +855,8 @@ O teste de resiliência automatizado (derrubar o consolidado sob carga e medir o
 | 4    | **Consolidação diária**: domínio do saldo diário, consumidor idempotente por `event_id`, UPSERT aditivo, retentativas e DLQ, reprocessamento de um dia                               | ✅ Concluída |
 | 5    | **API do consolidado**: consulta por dia e por período, saldo acumulado, cache Redis com fallback para o banco e circuit breaker                                                     | ✅ Concluída |
 | 6    | **Segurança**: Keycloak (OIDC), validação de JWT, escopos, `merchant_id` vindo do token, rate limiting, headers de segurança                                                         | ✅ Concluída |
-| 7    | **Observabilidade**: OpenTelemetry (traces, métricas, logs), correlation id ponta a ponta, Prometheus, Grafana, Tempo e Loki, dashboards e alertas                                   | ⏳ Próxima   |
-| 8    | **Resiliência e carga**: teste que derruba o consolidado e prova que o ledger continua respondendo; k6 com 50 req/s e limite de 5% de falhas                                         | Pendente     |
+| 7    | **Observabilidade**: OpenTelemetry (traces, métricas, logs), correlation id ponta a ponta, Prometheus, Grafana, Tempo e Loki, dashboards e alertas                                   | ✅ Concluída |
+| 8    | **Resiliência e carga**: teste que derruba o consolidado e prova que o ledger continua respondendo; k6 com 50 req/s e limite de 5% de falhas                                         | ⏳ Próxima   |
 | 9    | **Documentação**: domínios e capacidades, requisitos, arquitetura alvo e de transição, ADRs, segurança, observabilidade e estimativa de custos em `docs/`                            | Pendente     |
 | 10   | **CI/CD**: GitHub Actions com lint, testes, cobertura, CodeQL e Trivy; Terraform opcional para AWS                                                                                   | Pendente     |
 

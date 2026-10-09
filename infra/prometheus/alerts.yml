@@ -1,0 +1,110 @@
+groups:
+  - name: cash-flow-slo
+    rules:
+      - alert: DailyBalanceRequestLossAboveBudget
+        expr: |
+          (
+            sum(rate(http_server_request_duration_seconds_count{job="cash-flow/daily-balance", http_response_status_code=~"5..|429"}[5m]))
+            /
+            sum(rate(http_server_request_duration_seconds_count{job="cash-flow/daily-balance"}[5m]))
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Consolidated balance API is failing more than the 5% allowed by the requirement
+          description: '{{ $value | humanizePercentage }} of the requests failed in the last 5 minutes.'
+
+      - alert: LedgerErrorRateHigh
+        expr: |
+          (
+            sum(rate(http_server_request_duration_seconds_count{job="cash-flow/ledger", http_response_status_code=~"5.."}[5m]))
+            /
+            sum(rate(http_server_request_duration_seconds_count{job="cash-flow/ledger"}[5m]))
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Ledger is failing to record entries
+          description: '{{ $value | humanizePercentage }} of the ledger requests failed in the last 5 minutes.'
+
+      - alert: DailyBalanceLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_server_request_duration_seconds_bucket{job="cash-flow/daily-balance"}[5m]))
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Consolidated balance API p95 latency above 500 ms
+
+  - name: cash-flow-pipeline
+    rules:
+      - alert: OutboxLagHigh
+        expr: max(cashflow_outbox_lag_seconds) > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Events are waiting more than 1 minute to be published
+          description: 'The oldest pending event is {{ $value | humanizeDuration }} old. Check the relay and RabbitMQ.'
+
+      - alert: ConsolidationLagHigh
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(cashflow_consolidation_lag_seconds_bucket[5m]))) > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Entries take more than 30 seconds to reach the daily balance (p95)
+
+      - alert: ConsumerBacklogGrowing
+        expr: rabbitmq_detailed_queue_messages_ready{queue="daily-balance.ledger-events"} > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: The consolidation queue is accumulating messages
+          description: '{{ $value }} messages are waiting. Check if the consumer is running and healthy.'
+
+      - alert: DeadLetterQueueNotEmpty
+        expr: rabbitmq_detailed_queue_messages{queue="daily-balance.ledger-events.dlq"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Ledger events were dead-lettered and are missing from the daily balance
+          description: '{{ $value }} messages in the DLQ. Inspect the x-dead-letter-reason header, fix the cause and run redrive-dead-letters.'
+
+  - name: cash-flow-dependencies
+    rules:
+      - alert: CircuitBreakerOpen
+        expr: max by (circuit) (cashflow_circuit_breaker_state) == 2
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Circuit {{ $labels.circuit }} is open'
+          description: The consolidated API is bypassing this dependency.
+
+      - alert: StaleBalanceReportsServed
+        expr: sum(rate(cashflow_balance_report_requests_total{cache="stale"}[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: The consolidated API is serving cached reports because its database is unavailable
+
+      - alert: ServiceNotReportingTelemetry
+        expr: |
+          absent_over_time(cashflow_service_up{job="cash-flow/ledger"}[1m])
+          or absent_over_time(cashflow_service_up{job="cash-flow/ledger-outbox-relay"}[1m])
+          or absent_over_time(cashflow_service_up{job="cash-flow/daily-balance"}[1m])
+          or absent_over_time(cashflow_service_up{job="cash-flow/daily-balance-consumer"}[1m])
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.job }} stopped sending telemetry and may be down'

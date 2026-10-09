@@ -1,6 +1,7 @@
 import { LEDGER_EVENTS_EXCHANGE } from '@cash-flow/contracts';
 import { pino } from 'pino';
 import { buildHealthServer } from './adapters/inbound/http/health-server.js';
+import { OutboxMetrics } from './adapters/inbound/scheduler/outbox-metrics.js';
 import { PollingWorker } from './adapters/inbound/scheduler/polling-worker.js';
 import { RabbitMqConnection } from './adapters/outbound/messaging/rabbitmq-connection.js';
 import { RabbitMqEventPublisher } from './adapters/outbound/messaging/rabbitmq-event-publisher.js';
@@ -25,11 +26,16 @@ const database = new PostgresDatabase(
 const connection = await RabbitMqConnection.open(env.RABBITMQ_URL, logger);
 const publisher = new RabbitMqEventPublisher(connection, LEDGER_EVENTS_EXCHANGE);
 
+const outbox = new PostgresOutboxStore(database);
+const clock = new SystemClock();
+const outboxMetrics = new OutboxMetrics();
+outboxMetrics.observeBacklog(() => outbox.backlog(), clock);
+
 const publishPendingEvents = new PublishPendingEventsService({
-  outbox: new PostgresOutboxStore(database),
+  outbox,
   publisher,
   transactions: database,
-  clock: new SystemClock(),
+  clock,
   batchSize: env.OUTBOX_BATCH_SIZE,
   retryBackoff: {
     baseDelayMs: env.OUTBOX_RETRY_BASE_DELAY_MS,
@@ -39,6 +45,7 @@ const publishPendingEvents = new PublishPendingEventsService({
 
 const relayPendingEvents = async (): Promise<number> => {
   const report = await publishPendingEvents.execute();
+  outboxMetrics.record(report);
   for (const rejection of report.rejected) {
     logger.warn(rejection, 'event rejected by the broker, retrying later');
   }

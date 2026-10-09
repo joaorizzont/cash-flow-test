@@ -24,7 +24,12 @@ describe('LedgerMessageHandler', () => {
 
     const outcome = await handlerWith(execute).handle(messageOf(event));
 
-    expect(outcome).toEqual({ action: 'ack', eventId: event.id, result: 'APPLIED' });
+    expect(outcome).toEqual({
+      action: 'ack',
+      eventId: event.id,
+      occurredAt: event.time,
+      result: 'APPLIED',
+    });
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({ eventId: event.id }));
   });
 

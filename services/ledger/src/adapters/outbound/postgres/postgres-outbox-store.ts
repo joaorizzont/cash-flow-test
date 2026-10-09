@@ -12,6 +12,11 @@ interface OutboxRow {
   readonly attempts: number;
 }
 
+export interface OutboxBacklog {
+  readonly pending: number;
+  readonly oldestOccurredAt: Date | null;
+}
+
 export class PostgresOutboxStore implements OutboxStore {
   constructor(private readonly database: Queryable) {}
 
@@ -30,6 +35,15 @@ export class PostgresOutboxStore implements OutboxStore {
       body: row.payload,
       attempts: row.attempts,
     }));
+  }
+
+  async backlog(): Promise<OutboxBacklog> {
+    const result = await this.database.query<{ pending: number; oldest: Date | null }>(
+      `SELECT count(*)::bigint AS pending, min(occurred_at) AS oldest
+       FROM outbox WHERE published_at IS NULL`,
+    );
+    const row = result.rows[0];
+    return { pending: row?.pending ?? 0, oldestOccurredAt: row?.oldest ?? null };
   }
 
   async markPublished(ids: readonly string[], publishedAt: Date): Promise<void> {

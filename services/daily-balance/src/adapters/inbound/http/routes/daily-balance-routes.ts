@@ -2,6 +2,7 @@ import type { FastifyPluginAsyncTypebox } from '@fastify/type-provider-typebox';
 import type { FastifyReply } from 'fastify';
 import { ReportSource, type BalanceReportResult } from '../../../../application/index.js';
 import type { DailyBalanceApi } from '../daily-balance-api.js';
+import { ReportMetrics } from '../report-metrics.js';
 import { problemResponses } from '../schemas/common-schemas.js';
 import {
   BalanceReportSchema,
@@ -21,12 +22,15 @@ const CACHE_STATUS: Readonly<Record<ReportSource, string>> = {
   [ReportSource.STALE_CACHE]: 'STALE',
 };
 
-const withCacheStatus = (reply: FastifyReply, result: BalanceReportResult): FastifyReply =>
-  reply.header(CACHE_HEADER, CACHE_STATUS[result.source]);
+export const dailyBalanceRoutes = (api: DailyBalanceApi): FastifyPluginAsyncTypebox =>
+  async function dailyBalanceRoutes(app) {
+    const reportMetrics = new ReportMetrics();
+    const withCacheStatus = (reply: FastifyReply, result: BalanceReportResult): FastifyReply => {
+      const cacheStatus = CACHE_STATUS[result.source];
+      reportMetrics.record(cacheStatus);
+      return reply.header(CACHE_HEADER, cacheStatus);
+    };
 
-export const dailyBalanceRoutes =
-  (api: DailyBalanceApi): FastifyPluginAsyncTypebox =>
-  async (app) => {
     app.get(
       '/v1/daily-balances/:businessDate',
       {

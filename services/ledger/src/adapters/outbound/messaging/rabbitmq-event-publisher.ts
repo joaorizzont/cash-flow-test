@@ -1,7 +1,9 @@
 import { CLOUD_EVENTS_CONTENT_TYPE } from '@cash-flow/contracts';
+import { context } from '@opentelemetry/api';
 import type { ConfirmChannel, ConsumeMessage } from 'amqplib';
 import type { EventPublisher, PendingOutboxMessage } from '../../../application/index.js';
 import type { RabbitMqConnection } from './rabbitmq-connection.js';
+import { contextFromEvent } from '../telemetry/trace-context.js';
 import { UnroutableEventError } from './unroutable-event-error.js';
 
 const APP_ID = 'ledger';
@@ -17,7 +19,9 @@ export class RabbitMqEventPublisher implements EventPublisher {
 
   async publish(message: PendingOutboxMessage): Promise<void> {
     const channel = await this.confirmChannel();
-    await this.publishConfirmed(channel, message);
+    await context.with(contextFromEvent(message.body), () =>
+      this.publishConfirmed(channel, message),
+    );
     if (this.returnedIds.delete(message.id)) {
       throw new UnroutableEventError(message.id, message.type);
     }

@@ -9,9 +9,8 @@ import {
 import { principalOf } from '../security/authentication.js';
 import { LedgerScope } from '../security/scopes.js';
 
-export const pointOfSaleRoutes =
-  (api: LedgerApi): FastifyPluginAsyncTypebox =>
-  async (app) => {
+export const pointOfSaleRoutes = (api: LedgerApi): FastifyPluginAsyncTypebox =>
+  async function pointOfSaleRoutes(app) {
     app.put(
       '/v1/points-of-sale/:pointOfSaleId',
       {

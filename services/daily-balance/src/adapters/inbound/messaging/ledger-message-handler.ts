@@ -13,7 +13,12 @@ export interface InboundMessage {
 }
 
 export type HandlingOutcome =
-  | { readonly action: 'ack'; readonly eventId: string; readonly result: ConsolidationResult }
+  | {
+      readonly action: 'ack';
+      readonly eventId: string;
+      readonly occurredAt: string;
+      readonly result: ConsolidationResult;
+    }
   | { readonly action: 'retry'; readonly reason: string }
   | { readonly action: 'dead-letter'; readonly reason: string };
 
@@ -56,7 +61,7 @@ export class LedgerMessageHandler {
     try {
       const event = decode(message.content);
       const result = await this.options.consolidate.execute(toConsolidateMovementCommand(event));
-      return { action: 'ack', eventId: event.id, result };
+      return { action: 'ack', eventId: event.id, occurredAt: event.time, result };
     } catch (error) {
       return this.outcomeOf(error, message.attempt);
     }

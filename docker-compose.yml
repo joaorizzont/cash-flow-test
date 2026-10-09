@@ -1,5 +1,10 @@
 name: cash-flow
 
+x-telemetry: &telemetry
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  OTEL_SEMCONV_STABILITY_OPT_IN: http
+  OTEL_RESOURCE_ATTRIBUTES: service.namespace=cash-flow,deployment.environment.name=local
+
 x-postgres: &postgres
   image: postgres:17-alpine
   restart: unless-stopped
@@ -92,6 +97,8 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
     restart: unless-stopped
     environment:
+      <<: *telemetry
+      OTEL_SERVICE_NAME: ledger
       PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-ledger:5432/${LEDGER_DB:-ledger}
@@ -111,9 +118,11 @@ services:
       args:
         SERVICE: ledger
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
-    command: ['node', 'dist/relay.js']
+    command: ['node', '--import', './dist/telemetry.js', 'dist/relay.js']
     restart: unless-stopped
     environment:
+      <<: *telemetry
+      OTEL_SERVICE_NAME: ledger-outbox-relay
       PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-ledger:5432/${LEDGER_DB:-ledger}
@@ -134,6 +143,8 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
     restart: unless-stopped
     environment:
+      <<: *telemetry
+      OTEL_SERVICE_NAME: daily-balance
       PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-daily-balance:5432/${DAILY_BALANCE_DB:-daily_balance}
@@ -156,9 +167,11 @@ services:
       args:
         SERVICE: daily-balance
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
-    command: ['node', 'dist/consumer.js']
+    command: ['node', '--import', './dist/telemetry.js', 'dist/consumer.js']
     restart: unless-stopped
     environment:
+      <<: *telemetry
+      OTEL_SERVICE_NAME: daily-balance-consumer
       PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-daily-balance:5432/${DAILY_BALANCE_DB:-daily_balance}
@@ -172,7 +185,63 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.141.0
+    command: ['--config=/etc/otelcol/config.yaml']
+    restart: unless-stopped
+    volumes:
+      - ./infra/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - '4318:4318'
+    depends_on:
+      - tempo
+      - loki
+
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=7d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./infra/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports:
+      - '9090:9090'
+
+  tempo:
+    image: grafana/tempo:2.9.0
+    command: ['-config.file=/etc/tempo/tempo.yaml']
+    restart: unless-stopped
+    volumes:
+      - ./infra/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+
+  loki:
+    image: grafana/loki:3.5.8
+    command: ['-config.file=/etc/loki/local-config.yaml']
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.3.0
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: 'true'
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/cash-flow.json
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - '3000:3000'
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+
 volumes:
   ledger-data:
   daily-balance-data:
   rabbitmq-data:
+  prometheus-data:
