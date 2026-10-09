@@ -1,14 +1,6 @@
 import type { DailyBalanceRepository } from '../../../application/index.js';
-import { BusinessDate, DailyBalance, MerchantId } from '../../../domain/index.js';
+import type { BusinessDate, DailyBalance, MerchantId } from '../../../domain/index.js';
 import type { Queryable } from './postgres-database.js';
-
-interface DailyBalanceRow {
-  readonly merchant_id: string;
-  readonly business_date: string;
-  readonly total_credits_cents: number;
-  readonly total_debits_cents: number;
-  readonly entry_count: number;
-}
 
 const valuesOf = (balance: DailyBalance): readonly unknown[] => [
   balance.merchantId.value,
@@ -17,15 +9,6 @@ const valuesOf = (balance: DailyBalance): readonly unknown[] => [
   balance.totalDebitsInCents,
   balance.entryCount,
 ];
-
-const toDailyBalance = (row: DailyBalanceRow): DailyBalance =>
-  DailyBalance.restore({
-    merchantId: MerchantId.from(row.merchant_id),
-    businessDate: BusinessDate.from(row.business_date),
-    totalCreditsInCents: row.total_credits_cents,
-    totalDebitsInCents: row.total_debits_cents,
-    entryCount: row.entry_count,
-  });
 
 export class PostgresDailyBalanceRepository implements DailyBalanceRepository {
   constructor(private readonly database: Queryable) {}
@@ -69,16 +52,5 @@ export class PostgresDailyBalanceRepository implements DailyBalanceRepository {
          updated_at = now()`,
       valuesOf(balance),
     );
-  }
-
-  async find(merchantId: MerchantId, businessDate: BusinessDate): Promise<DailyBalance | null> {
-    const result = await this.database.query<DailyBalanceRow>(
-      `SELECT merchant_id, business_date, total_credits_cents, total_debits_cents, entry_count
-       FROM daily_balances
-       WHERE merchant_id = $1 AND business_date = $2`,
-      [merchantId.value, businessDate.value],
-    );
-    const row = result.rows[0];
-    return row === undefined ? null : toDailyBalance(row);
   }
 }

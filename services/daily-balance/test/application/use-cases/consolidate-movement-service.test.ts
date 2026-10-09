@@ -12,7 +12,7 @@ describe('ConsolidateMovementService', () => {
   let service: ConsolidateMovementService;
 
   const dailyBalance = () =>
-    balances.find(MerchantId.from(MERCHANT_ID), BusinessDate.from(BUSINESS_DATE));
+    balances.balanceOf(MerchantId.from(MERCHANT_ID), BusinessDate.from(BUSINESS_DATE));
 
   beforeEach(() => {
     journal = new InMemoryMovementJournal();

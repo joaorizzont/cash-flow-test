@@ -8,7 +8,6 @@ import { RabbitMqLedgerEventConsumer } from '../../src/adapters/inbound/messagin
 import type { ConsumerTopology } from '../../src/adapters/outbound/messaging/consumer-topology.js';
 import { RabbitMqConnection } from '../../src/adapters/outbound/messaging/rabbitmq-connection.js';
 import { publishConfirmed } from '../../src/adapters/outbound/messaging/rabbitmq-publishing.js';
-import { PostgresDailyBalanceRepository } from '../../src/adapters/outbound/postgres/postgres-daily-balance-repository.js';
 import type { ConsolidateMovement } from '../../src/application/index.js';
 import { BusinessDate, MerchantId, type DailyBalance } from '../../src/domain/index.js';
 import {
@@ -18,6 +17,7 @@ import {
   MERCHANT_ID,
 } from '../support/fixtures.js';
 import { createDailyBalanceUseCases } from '../../src/container.js';
+import { dailyBalanceOf } from './support/daily-balance-of.js';
 import { connectTestDatabase, type TestDatabase } from './support/test-database.js';
 import { waitUntil } from './support/wait-until.js';
 
@@ -60,7 +60,6 @@ describe('ledger event consumer with RabbitMQ and PostgreSQL', () => {
   let connection: RabbitMqConnection;
   let publisherModel: ChannelModel;
   let publisherChannel: ConfirmChannel;
-  let balances: PostgresDailyBalanceRepository;
   let topology: ConsumerTopology;
   let consumer: RabbitMqLedgerEventConsumer | undefined;
 
@@ -87,7 +86,11 @@ describe('ledger event consumer with RabbitMQ and PostgreSQL', () => {
     });
 
   const dailyBalance = (): Promise<DailyBalance | null> =>
-    balances.find(MerchantId.from(MERCHANT_ID), BusinessDate.from(BUSINESS_DATE));
+    dailyBalanceOf(
+      testDatabase.database,
+      MerchantId.from(MERCHANT_ID),
+      BusinessDate.from(BUSINESS_DATE),
+    );
 
   const waitForEntryCount = (count: number) =>
     waitUntil(async () => (await dailyBalance())?.entryCount === count);
@@ -106,7 +109,6 @@ describe('ledger event consumer with RabbitMQ and PostgreSQL', () => {
 
   beforeAll(async () => {
     testDatabase = await connectTestDatabase();
-    balances = new PostgresDailyBalanceRepository(testDatabase.database);
     connection = await RabbitMqConnection.open(inject('rabbitMqUrl'), silentLogger);
     publisherModel = await connect(inject('rabbitMqUrl'));
     publisherChannel = await publisherModel.createConfirmChannel();

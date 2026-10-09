@@ -1,7 +1,5 @@
 import { Type } from 'typebox';
 
-export const UuidSchema = Type.String({ format: 'uuid' });
-
 export const IdempotentHeadersSchema = Type.Object({
   'idempotency-key': Type.Optional(
     Type.String({

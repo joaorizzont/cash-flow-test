@@ -4,4 +4,5 @@ coverage/
 .env
 *.log
 .DS_Store
-tests/results/
+tests/results/*
+!tests/results/.gitkeep

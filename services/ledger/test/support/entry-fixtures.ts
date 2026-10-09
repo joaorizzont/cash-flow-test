@@ -20,7 +20,7 @@ export const POINT_OF_SALE_ID = '3e4d5c6b-7a89-4b0c-9d1e-2f3a4b5c6d7e';
 export const NOW = new Date('2026-10-09T15:00:00.000Z');
 export const TODAY = '2026-10-09';
 
-export const newEntryProps = (overrides: Partial<NewEntryProps> = {}): NewEntryProps => ({
+const newEntryProps = (overrides: Partial<NewEntryProps> = {}): NewEntryProps => ({
   id: EntryId.from(ENTRY_ID),
   merchantId: MerchantId.from(MERCHANT_ID),
   pointOfSaleId: null,

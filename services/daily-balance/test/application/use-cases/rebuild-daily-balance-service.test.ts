@@ -53,7 +53,9 @@ describe('RebuildDailyBalanceService', () => {
       balanceInCents: 7_000,
       entryCount: 2,
     });
-    expect(await balances.find(merchantId, businessDate)).toMatchObject({ balanceInCents: 7_000 });
+    expect(await balances.balanceOf(merchantId, businessDate)).toMatchObject({
+      balanceInCents: 7_000,
+    });
   });
 
   it('locks the day before reading the journal', async () => {

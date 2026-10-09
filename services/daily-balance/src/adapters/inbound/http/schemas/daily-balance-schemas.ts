@@ -12,7 +12,7 @@ const dailyBalanceFields = {
   closingBalanceInCents: cents('Accumulated balance at the end of the day'),
 };
 
-export const DailyBalanceLineSchema = Type.Object(dailyBalanceFields);
+const DailyBalanceLineSchema = Type.Object(dailyBalanceFields);
 
 export const DailyBalanceSchema = Type.Object({
   merchantId: Type.String({ format: 'uuid' }),

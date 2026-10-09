@@ -9,6 +9,7 @@ import {
 } from '../../src/application/index.js';
 import { BusinessDate, MerchantId } from '../../src/domain/index.js';
 import { BUSINESS_DATE, consolidateCommand, MERCHANT_ID } from '../support/fixtures.js';
+import { dailyBalanceOf } from './support/daily-balance-of.js';
 import { connectTestDatabase, type TestDatabase } from './support/test-database.js';
 
 const merchantId = MerchantId.from(MERCHANT_ID);
@@ -57,7 +58,7 @@ describe('consolidation with PostgreSQL', () => {
     await consolidate.execute(consolidateCommand({ amountInCents: 10_000 }));
     await consolidate.execute(consolidateCommand({ entryType: 'DEBIT', amountInCents: 2_500 }));
 
-    expect(await balances.find(merchantId, businessDate)).toMatchObject({
+    expect(await dailyBalanceOf(testDatabase.database, merchantId, businessDate)).toMatchObject({
       totalCreditsInCents: 10_000,
       totalDebitsInCents: 2_500,
       balanceInCents: 7_500,
@@ -75,7 +76,9 @@ describe('consolidation with PostgreSQL', () => {
     ];
 
     expect(results).toEqual(['APPLIED', 'DUPLICATE', 'DUPLICATE']);
-    expect((await balances.find(merchantId, businessDate))?.entryCount).toBe(1);
+    expect(
+      (await dailyBalanceOf(testDatabase.database, merchantId, businessDate))?.entryCount,
+    ).toBe(1);
   });
 
   it('counts each event once under concurrent redeliveries', async () => {
@@ -85,7 +88,7 @@ describe('consolidation with PostgreSQL', () => {
     const results = await Promise.all(deliveries.map((command) => consolidate.execute(command)));
 
     expect(results.filter((result) => result === ConsolidationResult.APPLIED)).toHaveLength(20);
-    expect(await balances.find(merchantId, businessDate)).toMatchObject({
+    expect(await dailyBalanceOf(testDatabase.database, merchantId, businessDate)).toMatchObject({
       totalCreditsInCents: 2_000,
       entryCount: 20,
     });
@@ -107,7 +110,7 @@ describe('consolidation with PostgreSQL', () => {
     ]);
     const totals = await journalTotals();
 
-    expect(await balances.find(merchantId, businessDate)).toMatchObject({
+    expect(await dailyBalanceOf(testDatabase.database, merchantId, businessDate)).toMatchObject({
       totalCreditsInCents: totals?.credits,
       totalDebitsInCents: totals?.debits,
       entryCount: 60,
@@ -124,13 +127,15 @@ describe('consolidation with PostgreSQL', () => {
     const view = await rebuild.execute({ merchantId: MERCHANT_ID, businessDate: BUSINESS_DATE });
 
     expect(view).toMatchObject({ balanceInCents: 6_000, entryCount: 2 });
-    expect(await balances.find(merchantId, businessDate)).toMatchObject({
+    expect(await dailyBalanceOf(testDatabase.database, merchantId, businessDate)).toMatchObject({
       balanceInCents: 6_000,
       entryCount: 2,
     });
   });
 
   it('returns null for a day without balance', async () => {
-    expect(await balances.find(merchantId, BusinessDate.from('2026-01-01'))).toBeNull();
+    expect(
+      await dailyBalanceOf(testDatabase.database, merchantId, BusinessDate.from('2026-01-01')),
+    ).toBeNull();
   });
 });

@@ -33,7 +33,10 @@ export class InMemoryDailyBalanceRepository implements DailyBalanceRepository {
     this.balances.set(keyOf(balance.merchantId, balance.businessDate), balance);
   }
 
-  async find(merchantId: MerchantId, businessDate: BusinessDate): Promise<DailyBalance | null> {
+  async balanceOf(
+    merchantId: MerchantId,
+    businessDate: BusinessDate,
+  ): Promise<DailyBalance | null> {
     return this.balances.get(keyOf(merchantId, businessDate)) ?? null;
   }
 }
