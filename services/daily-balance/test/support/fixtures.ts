@@ -9,6 +9,7 @@ import {
 import type { ConsolidateMovementCommand } from '../../src/application/index.js';
 import {
   BusinessDate,
+  DailyBalance,
   EntryId,
   EntryType,
   MerchantId,
@@ -77,3 +78,16 @@ export const entryReversedEvent = (reversedEntryId: string): EntryReversedV1 => 
     data: { ...recorded.data, reversedEntryId },
   };
 };
+
+export const dailyBalance = (
+  businessDate: string,
+  totals: { credits: number; debits: number; count?: number },
+  merchantId: string = MERCHANT_ID,
+): DailyBalance =>
+  DailyBalance.restore({
+    merchantId: MerchantId.from(merchantId),
+    businessDate: BusinessDate.from(businessDate),
+    totalCreditsInCents: totals.credits,
+    totalDebitsInCents: totals.debits,
+    entryCount: totals.count ?? 1,
+  });

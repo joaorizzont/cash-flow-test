@@ -4,7 +4,10 @@ import type { Queryable } from './postgres-database.js';
 export class PostgresHealthIndicator implements HealthIndicator {
   readonly name = 'postgres';
 
-  constructor(private readonly database: Queryable) {}
+  constructor(
+    private readonly database: Queryable,
+    readonly critical = true,
+  ) {}
 
   async isHealthy(): Promise<boolean> {
     await this.database.query('SELECT 1');

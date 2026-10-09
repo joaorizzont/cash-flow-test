@@ -111,6 +111,9 @@ services:
       PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-daily-balance:5432/${DAILY_BALANCE_DB:-daily_balance}
+      REDIS_URL: redis://redis:6379
+      CACHE_FRESH_TTL_MS: ${CACHE_FRESH_TTL_MS:-5000}
+      CACHE_STALE_TTL_SECONDS: ${CACHE_STALE_TTL_SECONDS:-86400}
     ports:
       - '${DAILY_BALANCE_PORT:-3002}:3000'
     depends_on:

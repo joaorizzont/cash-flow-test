@@ -9,3 +9,5 @@ export * from './shared/domain-error.js';
 export * from './shared/identifier.js';
 export * from './shared/merchant-id.js';
 export * from './shared/validation-error.js';
+export * from './report/balance-report.js';
+export * from './report/report-period.js';

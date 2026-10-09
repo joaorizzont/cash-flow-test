@@ -8,29 +8,38 @@ import {
 
 const DATABASE_URL = 'postgres://user:secret@localhost:5433/daily_balance';
 const RABBITMQ_URL = 'amqp://user:secret@localhost:5672';
+const REDIS_URL = 'redis://localhost:6379';
 
 describe('loadApiEnv', () => {
   it('applies defaults', () => {
-    expect(loadApiEnv({ DATABASE_URL })).toEqual({
+    expect(loadApiEnv({ DATABASE_URL, REDIS_URL })).toEqual({
       NODE_ENV: 'development',
       SERVICE_NAME: 'daily-balance',
       PORT: 3000,
       LOG_LEVEL: 'info',
       DATABASE_URL,
       DATABASE_POOL_SIZE: 10,
+      REDIS_URL,
+      DATABASE_TIMEOUT_MS: 2_000,
+      CACHE_FRESH_TTL_MS: 5_000,
+      CACHE_STALE_TTL_SECONDS: 86_400,
+      CACHE_TIMEOUT_MS: 100,
+      CIRCUIT_FAILURE_THRESHOLD: 5,
+      CIRCUIT_RESET_TIMEOUT_MS: 10_000,
     });
   });
 
   it('coerces the port from string', () => {
-    expect(loadApiEnv({ DATABASE_URL, PORT: '8080' }).PORT).toBe(8080);
+    expect(loadApiEnv({ DATABASE_URL, REDIS_URL, PORT: '8080' }).PORT).toBe(8080);
   });
 
-  it('requires the database url', () => {
-    expect(() => loadApiEnv({})).toThrow();
+  it('requires the database and redis urls', () => {
+    expect(() => loadApiEnv({ REDIS_URL })).toThrow();
+    expect(() => loadApiEnv({ DATABASE_URL })).toThrow();
   });
 
   it('rejects an invalid log level', () => {
-    expect(() => loadApiEnv({ DATABASE_URL, LOG_LEVEL: 'verbose' })).toThrow();
+    expect(() => loadApiEnv({ DATABASE_URL, REDIS_URL, LOG_LEVEL: 'verbose' })).toThrow();
   });
 });
 
