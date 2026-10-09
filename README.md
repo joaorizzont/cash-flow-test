@@ -253,11 +253,12 @@ As migrations do banco são aplicadas automaticamente na inicialização do serv
 
 ### Testes
 
-| Tipo       | Comando                                    | O que cobre                                                                                                                                                 |
-| ---------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Unidade    | `npm test`                                 | Domínio, casos de uso, rotas HTTP e tratamento de mensagens com adapters em memória; não exige infraestrutura                                               |
-| Integração | `npm run test:integration`                 | Repositórios, outbox, migrations, idempotência, APIs, relay, consumidor e cache contra PostgreSQL, RabbitMQ e Redis reais via Testcontainers (exige Docker) |
-| Cobertura  | `npm run test:coverage -w services/ledger` | Relatório de cobertura dos testes de unidade                                                                                                                |
+| Tipo                | Comando                                        | O que cobre                                                                                                                                                 |
+| ------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Unidade             | `npm test`                                     | Domínio, casos de uso, rotas HTTP e tratamento de mensagens com adapters em memória; não exige infraestrutura                                               |
+| Integração          | `npm run test:integration`                     | Repositórios, outbox, migrations, idempotência, APIs, relay, consumidor e cache contra PostgreSQL, RabbitMQ e Redis reais via Testcontainers (exige Docker) |
+| Carga e resiliência | `npm run test:load`, `npm run test:resilience` | Requisitos não funcionais contra o ambiente completo (veja [Testes de carga e resiliência](#testes-de-carga-e-resiliência))                                 |
+| Cobertura           | `npm run test:coverage -w services/ledger`     | Relatório de cobertura dos testes de unidade                                                                                                                |
 
 Os testes de integração verificam inclusive cenários de concorrência e falha: duas requisições simultâneas com a mesma chave de idempotência gravam um único lançamento; dois estornos simultâneos resultam em um sucesso e um conflito; três relays em paralelo publicam cada evento exatamente uma vez; um evento sem fila de destino fica pendente com nova tentativa agendada, sem bloquear os demais. No consolidado: o mesmo evento entregue três vezes em paralelo é somado uma única vez; uma reconstrução executada durante o consumo termina com o saldo igual ao diário; falhas transitórias passam pela fila de espera e são aplicadas; e mensagens inválidas ou com tentativas esgotadas vão para a DLQ e podem ser devolvidas à fila. Na API do consolidado: a segunda leitura vem do Redis; com o banco fora, o último relatório conhecido é servido como `STALE`; com o Redis inacessível, as consultas seguem pelo banco. Em ambos os serviços, conexões encerradas pelo PostgreSQL não derrubam o processo.
 
@@ -593,7 +594,7 @@ O header `x-cache` informa a origem da resposta:
 
 O cache não é invalidado a cada evento consumido. Como a consolidação já é assíncrona, uma defasagem adicional de até 5 s é aceitável e mantém o consumidor independente do Redis.
 
-Medição local (Docker Desktop, 50 req/s por 20 s, mistura de consultas de um dia e de período): 1.000 requisições, todas com sucesso, latência p95 de 9,7 ms e p99 de 21,5 ms. O teste de carga formal, com k6, entra na Fase 8.
+Com o teste de carga formal (k6, 50 req/s por 2 minutos), o consolidado respondeu 6.001 requisições sem nenhuma falha, com p95 de 6,5 ms. Veja [Testes de carga e resiliência](#testes-de-carga-e-resiliência).
 
 | Variável                    | Padrão  | Descrição                                                       |
 | --------------------------- | ------- | --------------------------------------------------------------- |
@@ -658,15 +659,15 @@ TOKEN=$(curl -s http://localhost:8180/realms/cash-flow/protocol/openid-connect/t
 
 ### Proteções adicionais
 
-| Proteção                      | Detalhe                                                                                                                                                                                                                                                                           |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rate limiting por comerciante | Contado pelo `merchant_id` do token. Padrão: 600 req/min no ledger e 1.200 req/min no consolidado, configuráveis por `RATE_LIMIT_MAX` e `RATE_LIMIT_WINDOW_MS`. Excedido, retorna `429` com `Retry-After`. Health checks não são limitados                                        |
-| Headers de segurança          | `@fastify/helmet`: `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options`, `Content-Security-Policy` e outros. A diretiva `upgrade-insecure-requests` foi removida porque o TLS termina no gateway e ela impediria o uso da documentação em HTTP local |
-| Limite de corpo               | 16 KiB no ledger, o suficiente para um lançamento e pequeno o bastante para conter abusos                                                                                                                                                                                         |
-| Validação de entrada          | Todo corpo, parâmetro e query é validado por JSON Schema, sem propriedades extras; os value objects do domínio validam novamente                                                                                                                                                  |
-| Erros sem detalhes internos   | Erros inesperados retornam apenas `INTERNAL_ERROR`; o detalhe fica no log                                                                                                                                                                                                         |
-| Proteção contra força bruta   | Habilitada no realm do Keycloak                                                                                                                                                                                                                                                   |
-| Menor privilégio              | Containers rodam com usuário não-root; cada serviço tem seu próprio banco                                                                                                                                                                                                         |
+| Proteção                      | Detalhe                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rate limiting por comerciante | Contado pelo `merchant_id` do token. Padrão: 1.200 req/min (20 req/s) no ledger e 6.000 req/min (100 req/s) no consolidado, configuráveis por `RATE_LIMIT_MAX` e `RATE_LIMIT_WINDOW_MS`. O limite do consolidado é o dobro do pico exigido (50 req/s), pois o desafio trata do fluxo de caixa de um único comerciante, que pode gerar sozinho todo o pico. Excedido, retorna `429` com `Retry-After`. Health checks não são limitados |
+| Headers de segurança          | `@fastify/helmet`: `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options`, `Content-Security-Policy` e outros. A diretiva `upgrade-insecure-requests` foi removida porque o TLS termina no gateway e ela impediria o uso da documentação em HTTP local                                                                                                                                                     |
+| Limite de corpo               | 16 KiB no ledger, o suficiente para um lançamento e pequeno o bastante para conter abusos                                                                                                                                                                                                                                                                                                                                             |
+| Validação de entrada          | Todo corpo, parâmetro e query é validado por JSON Schema, sem propriedades extras; os value objects do domínio validam novamente                                                                                                                                                                                                                                                                                                      |
+| Erros sem detalhes internos   | Erros inesperados retornam apenas `INTERNAL_ERROR`; o detalhe fica no log                                                                                                                                                                                                                                                                                                                                                             |
+| Proteção contra força bruta   | Habilitada no realm do Keycloak                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Menor privilégio              | Containers rodam com usuário não-root; cada serviço tem seu próprio banco                                                                                                                                                                                                                                                                                                                                                             |
 
 ### Disponibilidade da autenticação
 
@@ -842,7 +843,81 @@ Mecanismos envolvidos:
 | Timeouts de conexão e de consulta                 | API do consolidado     | `DATABASE_TIMEOUT_MS` e `CACHE_TIMEOUT_MS` limitam quanto uma requisição pode esperar    |
 | Reinício automático e health checks               | Docker Compose         | `restart: unless-stopped` e `HEALTHCHECK` em todas as imagens                            |
 
-O teste de resiliência automatizado (derrubar o consolidado sob carga e medir o ledger) e o teste de carga com k6 fazem parte da Fase 8.
+Os cenários de queda do consolidado, do Redis e do banco do consolidado também são executados automaticamente, sob carga, pelos testes de resiliência (veja [Testes de carga e resiliência](#testes-de-carga-e-resiliência)).
+
+## Testes de carga e resiliência
+
+Os dois requisitos não funcionais do desafio são verificados por testes automatizados que rodam contra o ambiente completo do Docker Compose:
+
+1. **O ledger continua disponível quando o consolidado cai.**
+2. **O consolidado suporta 50 req/s com no máximo 5% de perda.**
+
+A carga é gerada com [k6](https://k6.io), em um container do próprio Compose (perfil `tools`). Os tokens são obtidos no Keycloak no início de cada teste. Os resultados completos em JSON ficam em `tests/results/`.
+
+| Comando                            | O que faz                                                                                                                                                            |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run test:load`                | 50 req/s no consolidado por 2 minutos (consultas de um dia e de período), com 5 lançamentos/s no ledger ao mesmo tempo                                               |
+| `npm run test:resilience`          | Grava lançamentos a 10 req/s por 90 s, derruba o consolidado inteiro (API, consumidor e banco) por 30 s, religa e confere se todos os lançamentos foram consolidados |
+| `npm run test:resilience:redis`    | Pico de 50 req/s com o Redis fora do ar por 30 s                                                                                                                     |
+| `npm run test:resilience:database` | Pico de 50 req/s com o banco do consolidado fora do ar por 30 s                                                                                                      |
+
+Parâmetros podem ser ajustados por variável de ambiente, por exemplo `docker compose run --rm -e RATE=200 -e DURATION=60s k6 run /scripts/load/daily-balance-peak.js`.
+
+### Critérios de aprovação
+
+| Teste         | Critério (thresholds do k6)                                                                                                                    |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Carga de pico | Falhas abaixo de 5% (requisito), p95 abaixo de 500 ms e **nenhuma iteração descartada**, para garantir que os 50 req/s foram de fato entregues |
+| Resiliência   | **Zero** falhas no ledger durante a queda, p95 abaixo de 500 ms e, ao final, o saldo consolidado igual à soma exata dos lançamentos gravados   |
+
+### Resultados
+
+Ambiente: MacBook Air Apple M1 (8 núcleos, 16 GB), Docker Desktop com 8 CPUs e 8 GB, todos os 14 containers rodando, incluindo a stack de observabilidade e o gerador de carga na mesma máquina.
+
+**Requisito 1: o ledger continua disponível com o consolidado fora do ar**
+
+| Métrica                                     | Resultado                      |
+| ------------------------------------------- | ------------------------------ |
+| Lançamentos gravados durante o teste        | 900 (10 req/s por 90 s)        |
+| Falhas do ledger, inclusive durante a queda | **0**                          |
+| Latência p95 do ledger                      | 20 ms                          |
+| Lançamentos consolidados após o retorno     | **900 de 900**                 |
+| Créditos no saldo consolidado               | R$ 45.950,18, igual ao gravado |
+
+Durante os 30 segundos de queda, os eventos ficaram na fila do RabbitMQ e foram processados quando o consolidado voltou. Ao fim da carga, o saldo já batia com o total gravado.
+
+**Requisito 2: 50 req/s no consolidado com no máximo 5% de perda**
+
+| Cenário                                    | Requisições | Falhas    | p95     | Máximo |
+| ------------------------------------------ | ----------- | --------- | ------- | ------ |
+| Pico de 50 req/s por 2 minutos             | 6.001       | **0,00%** | 6,5 ms  | 124 ms |
+| Pico de 50 req/s com o Redis fora por 30 s | 3.000       | **0,00%** | 22,0 ms | 1,1 s  |
+| Pico de 50 req/s com o banco fora por 30 s | 3.001       | **0,00%** | 8,3 ms  | 238 ms |
+
+Nos três cenários, os lançamentos gravados em paralelo no ledger também tiveram 0% de falha.
+
+- **Redis fora:** houve picos isolados de latência (máximo de 1,1 s) no momento da queda; o p95 ficou em 22 ms e, com o circuito aberto, o consolidado passa a responder pelo banco sem chamar o Redis.
+- **Banco fora:** os relatórios já calculados foram servidos do cache como `STALE`.
+
+**Folga de capacidade (estresse, com o limite de requisições desativado só para a medição)**
+
+| Taxa      | Requisições | Falhas | p95     | Iterações descartadas pelo gerador |
+| --------- | ----------- | ------ | ------- | ---------------------------------- |
+| 200 req/s | 11.999      | 0,00%  | 7,6 ms  | 1                                  |
+| 400 req/s | 23.955      | 0,00%  | 20,9 ms | 46 (0,2%)                          |
+
+Com uma única réplica de cada serviço, o consolidado atendeu **8 vezes o pico exigido** sem erros. Nesse ponto, o limite passou a ser o gerador de carga, que roda na mesma máquina. Em produção, a capacidade cresce horizontalmente com mais réplicas da API, já que o estado fica no Redis e no PostgreSQL.
+
+### Por que o consolidado aguenta o pico
+
+| Fator                            | Efeito                                                                                            |
+| -------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Modelo de leitura materializado  | A consulta não soma lançamentos: lê linhas já consolidadas por chave primária                     |
+| Cache Redis                      | Consultas repetidas não chegam ao banco; leituras simultâneas iguais são agrupadas                |
+| Reserva de cache para falhas     | Uma queda do banco não vira erro para relatórios já calculados                                    |
+| Circuit breakers e timeouts      | Uma dependência lenta não acumula requisições presas                                              |
+| Limite por comerciante com folga | O limite de 100 req/s por comerciante protege contra abuso sem cortar o pico legítimo de 50 req/s |
+| Consumidor separado da API       | A carga de eventos não compete com as consultas                                                   |
 
 ## Roteiro de desenvolvimento
 
@@ -856,8 +931,8 @@ O teste de resiliência automatizado (derrubar o consolidado sob carga e medir o
 | 5    | **API do consolidado**: consulta por dia e por período, saldo acumulado, cache Redis com fallback para o banco e circuit breaker                                                     | ✅ Concluída |
 | 6    | **Segurança**: Keycloak (OIDC), validação de JWT, escopos, `merchant_id` vindo do token, rate limiting, headers de segurança                                                         | ✅ Concluída |
 | 7    | **Observabilidade**: OpenTelemetry (traces, métricas, logs), correlation id ponta a ponta, Prometheus, Grafana, Tempo e Loki, dashboards e alertas                                   | ✅ Concluída |
-| 8    | **Resiliência e carga**: teste que derruba o consolidado e prova que o ledger continua respondendo; k6 com 50 req/s e limite de 5% de falhas                                         | ⏳ Próxima   |
-| 9    | **Documentação**: domínios e capacidades, requisitos, arquitetura alvo e de transição, ADRs, segurança, observabilidade e estimativa de custos em `docs/`                            | Pendente     |
+| 8    | **Resiliência e carga**: teste que derruba o consolidado e prova que o ledger continua respondendo; k6 com 50 req/s e limite de 5% de falhas                                         | ✅ Concluída |
+| 9    | **Documentação**: domínios e capacidades, requisitos, arquitetura alvo e de transição, ADRs, segurança, observabilidade e estimativa de custos em `docs/`                            | ⏳ Próxima   |
 | 10   | **CI/CD**: GitHub Actions com lint, testes, cobertura, CodeQL e Trivy; Terraform opcional para AWS                                                                                   | Pendente     |
 
 ## Convenções

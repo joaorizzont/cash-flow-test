@@ -17,7 +17,11 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test:integration": "npm run test:integration --workspaces --if-present"
+    "test:integration": "npm run test:integration --workspaces --if-present",
+    "test:load": "docker compose run --rm k6 run --summary-export=/results/daily-balance-peak-50rps.json /scripts/load/daily-balance-peak.js",
+    "test:resilience": "node tests/resilience/consolidated-outage.mjs",
+    "test:resilience:redis": "node tests/resilience/dependency-outage-under-load.mjs redis",
+    "test:resilience:database": "node tests/resilience/dependency-outage-under-load.mjs postgres-daily-balance"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

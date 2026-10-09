@@ -32,7 +32,7 @@ describe('loadApiEnv', () => {
       CIRCUIT_RESET_TIMEOUT_MS: 10_000,
       ...AUTH,
       AUTH_AUDIENCE: 'cash-flow-api',
-      RATE_LIMIT_MAX: 1_200,
+      RATE_LIMIT_MAX: 6_000,
       RATE_LIMIT_WINDOW_MS: 60_000,
     });
   });

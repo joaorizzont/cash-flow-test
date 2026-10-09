@@ -21,7 +21,7 @@ describe('loadApiEnv', () => {
       MAX_BACKDATED_DAYS: 30,
       ...AUTH,
       AUTH_AUDIENCE: 'cash-flow-api',
-      RATE_LIMIT_MAX: 600,
+      RATE_LIMIT_MAX: 1_200,
       RATE_LIMIT_WINDOW_MS: 60_000,
     });
   });

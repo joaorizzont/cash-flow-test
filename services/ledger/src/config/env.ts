@@ -15,7 +15,7 @@ const apiSchema = baseSchema.extend({
   AUTH_ISSUER: z.url(),
   AUTH_JWKS_URL: z.url(),
   AUTH_AUDIENCE: z.string().min(1).default('cash-flow-api'),
-  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(600),
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(1_200),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
 });
 

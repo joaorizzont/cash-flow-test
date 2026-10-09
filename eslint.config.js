@@ -8,6 +8,21 @@ export default tseslint.config(
   ...tseslint.configs.strict,
   prettier,
   {
+    files: ['tests/**/*.js'],
+    languageOptions: { globals: { __ENV: 'readonly' } },
+  },
+  {
+    files: ['tests/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        fetch: 'readonly',
+        URLSearchParams: 'readonly',
+        URL: 'readonly',
+      },
+    },
+  },
+  {
     rules: {
       'no-console': 'error',
       'no-inline-comments': 'error',

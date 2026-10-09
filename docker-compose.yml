@@ -104,6 +104,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-ledger:5432/${LEDGER_DB:-ledger}
       DEFAULT_TIME_ZONE: ${DEFAULT_TIME_ZONE:-America/Sao_Paulo}
       MAX_BACKDATED_DAYS: ${MAX_BACKDATED_DAYS:-30}
+      RATE_LIMIT_MAX: ${LEDGER_RATE_LIMIT_MAX:-1200}
       AUTH_ISSUER: ${AUTH_PUBLIC_URL:-http://localhost:8180}/realms/cash-flow
       AUTH_JWKS_URL: http://keycloak:8080/realms/cash-flow/protocol/openid-connect/certs
     ports:
@@ -151,6 +152,7 @@ services:
       REDIS_URL: redis://redis:6379
       CACHE_FRESH_TTL_MS: ${CACHE_FRESH_TTL_MS:-5000}
       CACHE_STALE_TTL_SECONDS: ${CACHE_STALE_TTL_SECONDS:-86400}
+      RATE_LIMIT_MAX: ${DAILY_BALANCE_RATE_LIMIT_MAX:-6000}
       AUTH_ISSUER: ${AUTH_PUBLIC_URL:-http://localhost:8180}/realms/cash-flow
       AUTH_JWKS_URL: http://keycloak:8080/realms/cash-flow/protocol/openid-connect/certs
     ports:
@@ -239,6 +241,17 @@ services:
       - prometheus
       - tempo
       - loki
+
+  k6:
+    image: grafana/k6:1.4.2
+    profiles: ['tools']
+    environment:
+      LEDGER_URL: http://ledger:3000
+      DAILY_BALANCE_URL: http://daily-balance:3000
+      KEYCLOAK_URL: http://keycloak:8080
+    volumes:
+      - ./tests:/scripts:ro
+      - ./tests/results:/results
 
 volumes:
   ledger-data:
