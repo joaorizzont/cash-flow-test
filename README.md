@@ -4,6 +4,15 @@ Solução para o controle diário de fluxo de caixa de um comerciante: registro 
 
 A arquitetura é composta por **dois serviços independentes que se comunicam apenas por eventos**. O serviço de lançamentos continua disponível mesmo quando o serviço de consolidado está fora do ar, e o consolidado responde a partir de um modelo de leitura pré-calculado, suportando picos de 50 requisições por segundo.
 
+Os dois requisitos não funcionais do desafio são comprovados por testes automatizados contra o ambiente completo ([detalhes](#testes-de-carga-e-resiliência)):
+
+| Requisito                                                             | Resultado medido                                                                                    |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| O registro de lançamentos não fica indisponível se o consolidado cair | 900 lançamentos gravados com o consolidado fora do ar: **0 falhas**, 900 de 900 consolidados depois |
+| Consolidado com 50 req/s no pico e no máximo 5% de perda              | 6.001 requisições em 2 minutos: **0% de perda**, p95 de 6,5 ms (também 0% com Redis ou banco fora)  |
+
+A documentação de arquitetura (domínios, requisitos, arquitetura alvo e de transição, custos, segurança, operação e ADRs) está em [`docs/`](docs/README.md).
+
 > Projeto em construção, desenvolvido em fases. Cada fase corresponde a um ou mais commits. Veja o [roteiro](#roteiro-de-desenvolvimento).
 
 ## Visão geral
@@ -31,6 +40,22 @@ flowchart LR
 | `daily-balance`          | Servir o relatório de saldo diário a partir do modelo de leitura materializado, com cache Redis e circuit breakers. Aplica as migrations do seu banco. | `3002`      |
 | `daily-balance-consumer` | Consumir os eventos do ledger e manter o saldo diário materializado. Processo separado da API: a carga de consumo não afeta as consultas.              | `—`         |
 | `keycloak`               | Provedor de identidade (OIDC): autentica os usuários e emite os tokens JWT com o comerciante e os escopos.                                             | `8180`      |
+
+## Documentação do projeto
+
+A documentação completa de arquitetura fica em [`docs/`](docs/README.md) (em inglês, como o restante do código). Ela atende aos itens obrigatórios e diferenciais do desafio:
+
+| Documento                                                              | Conteúdo                                                                                                               | Item do desafio               |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| [Domínios e capacidades](docs/01-business-domains-and-capabilities.md) | Subdomínios (DDD), bounded contexts, mapa de contexto, mapa de capacidades de negócio e linguagem ubíqua PT/EN         | Obrigatório                   |
+| [Requisitos](docs/02-requirements.md)                                  | Requisitos funcionais, regras de negócio e não funcionais com metas mensuráveis, critérios de aceite e rastreabilidade | Obrigatório                   |
+| [Arquitetura alvo](docs/03-target-architecture.md)                     | C4 (contexto, containers e componentes), fluxos de dados, modelo de dados, contratos e implantação na AWS              | Obrigatório                   |
+| [Arquitetura de transição](docs/04-transition-architecture.md)         | Migração de um legado com Strangler Fig, CDC, coortes de comerciantes, migração de histórico e rollback por etapa      | Diferencial                   |
+| [Estimativa de custos](docs/05-cost-estimate.md)                       | Custo mensal de infraestrutura e licenças por ambiente, com premissas e otimizações                                    | Diferencial                   |
+| [Segurança](docs/06-security.md)                                       | Modelo de ameaças (STRIDE), critérios de segurança para consumo e integração de serviços, LGPD e checklist de produção | Diferencial                   |
+| [Operação](docs/07-operations.md)                                      | SLOs, runbook de cada alerta, backup e recuperação de desastres                                                        | Diferencial (observabilidade) |
+| [Evoluções futuras](docs/08-future-evolutions.md)                      | Limitações conhecidas e próximos passos priorizados                                                                    | Sugerido pelo desafio         |
+| [ADRs](docs/adr/README.md)                                             | 13 registros de decisão de arquitetura, com alternativas descartadas e consequências                                   | Obrigatório (justificativas)  |
 
 ## Justificativa das decisões de arquitetura e tecnologia
 
@@ -932,12 +957,12 @@ Com uma única réplica de cada serviço, o consolidado atendeu **8 vezes o pico
 | 6    | **Segurança**: Keycloak (OIDC), validação de JWT, escopos, `merchant_id` vindo do token, rate limiting, headers de segurança                                                         | ✅ Concluída |
 | 7    | **Observabilidade**: OpenTelemetry (traces, métricas, logs), correlation id ponta a ponta, Prometheus, Grafana, Tempo e Loki, dashboards e alertas                                   | ✅ Concluída |
 | 8    | **Resiliência e carga**: teste que derruba o consolidado e prova que o ledger continua respondendo; k6 com 50 req/s e limite de 5% de falhas                                         | ✅ Concluída |
-| 9    | **Documentação**: domínios e capacidades, requisitos, arquitetura alvo e de transição, ADRs, segurança, observabilidade e estimativa de custos em `docs/`                            | ⏳ Próxima   |
-| 10   | **CI/CD**: GitHub Actions com lint, testes, cobertura, CodeQL e Trivy; Terraform opcional para AWS                                                                                   | Pendente     |
+| 9    | **Documentação**: domínios e capacidades, requisitos, arquitetura alvo e de transição, ADRs, segurança, observabilidade e estimativa de custos em `docs/`                            | ✅ Concluída |
+| 10   | **CI/CD**: GitHub Actions com lint, testes, cobertura, CodeQL e Trivy; Terraform opcional para AWS                                                                                   | ⏳ Próxima   |
 
 ## Convenções
 
 - Código, nomes, mensagens de commit e documentação técnica em inglês; o README em português.
-- Código sem comentários: nomes expressivos, funções pequenas e responsabilidade única tornam a intenção explícita. As decisões ficam registradas na seção de justificativas e nos ADRs.
+- Código sem comentários: nomes expressivos, funções pequenas e responsabilidade única tornam a intenção explícita. As decisões ficam registradas na seção de justificativas e nos [ADRs](docs/adr/README.md).
 - Princípios SOLID e Clean Code, reforçados por regras de lint (complexidade ciclomática, número máximo de parâmetros, imports de tipo).
 - Commits seguindo [Conventional Commits](https://www.conventionalcommits.org/).

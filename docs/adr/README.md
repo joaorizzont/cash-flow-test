@@ -1,0 +1,19 @@
+# Architecture Decision Records
+
+Each significant architectural decision is recorded as an ADR: the context that forced a choice, the decision, the alternatives that were rejected and the consequences that come with it. The practice is described in [ADR-0001](0001-record-architecture-decisions.md).
+
+| ADR                                                     | Title                                                  | Status   | Summary                                                                                                          |
+| ------------------------------------------------------- | ------------------------------------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------- |
+| [0001](0001-record-architecture-decisions.md)           | Record architecture decisions                          | Accepted | Decisions are written down as lightweight ADRs, versioned next to the code                                       |
+| [0002](0002-event-driven-microservices.md)              | Event-driven microservices                             | Accepted | Two services, one per bounded context, communicating only through events to isolate failures                     |
+| [0003](0003-hexagonal-architecture.md)                  | Hexagonal architecture inside each service             | Accepted | Domain and use cases depend on ports; contract, broker and database changes stay in adapters                     |
+| [0004](0004-postgresql-database-per-service.md)         | PostgreSQL, one database per service                   | Accepted | Relational ACID storage for money, outbox and additive upserts; no shared database                               |
+| [0005](0005-transactional-outbox-with-polling-relay.md) | Transactional outbox with a polling relay              | Accepted | Entry and event are written in one transaction; a separate relay publishes with confirms and per-message backoff |
+| [0006](0006-rabbitmq-message-broker.md)                 | RabbitMQ as the message broker                         | Accepted | Durable topic exchange, quorum queues, retry queue and DLQ; Kafka rejected for the expected volume               |
+| [0007](0007-cloudevents-shared-contracts.md)            | CloudEvents and a shared contracts package             | Accepted | Versioned event schemas in a package with no business logic, using the CloudEvents envelope                      |
+| [0008](0008-materialized-daily-balance.md)              | Materialized daily balance with an idempotent consumer | Accepted | Balances are updated per event with deduplication by event and entry, and can be rebuilt from a journal          |
+| [0009](0009-business-date-and-time-zones.md)            | Business date and time zones per point of sale         | Accepted | The cash day is separate from the recording instant and resolved in the IANA time zone of the point of sale      |
+| [0010](0010-cache-and-circuit-breakers.md)              | Cache with stale fallback and circuit breakers         | Accepted | Redis cache-aside, stale-if-error, single flight and circuit breakers keep the report available at peak          |
+| [0011](0011-keycloak-jwt-scopes.md)                     | Keycloak, JWT validation and OAuth scopes              | Accepted | Tokens validated locally against JWKS; merchant comes from the token; scopes bound to roles                      |
+| [0012](0012-opentelemetry-grafana-stack.md)             | OpenTelemetry with Prometheus, Tempo, Loki and Grafana | Accepted | Vendor-neutral instrumentation with end-to-end traces through the outbox                                         |
+| [0013](0013-nodejs-typescript-fastify.md)               | Node.js, TypeScript and Fastify                        | Accepted | Strict TypeScript on Node.js 22 with Fastify, explicit SQL and schema-first validation                           |
