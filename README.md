@@ -41,6 +41,30 @@ O requisito não funcional mais forte do desafio é que _o serviço de lançamen
 | Serverless (Lambda) | Atende à carga, mas dificulta a execução local exigida no desafio, aumenta o acoplamento ao provedor e sofre com cold start em picos                                                   |
 | Microsserviços      | **Escolhida.** Isolamento de falha e escala independente; o custo operacional extra é compensado por Docker Compose, health checks e observabilidade desde o início                    |
 
+### Arquitetura interna de cada serviço: hexagonal (Ports and Adapters)
+
+**Escolha: arquitetura hexagonal em todos os serviços.**
+
+Em microsserviços, os contratos de comunicação entre as aplicações são justamente a parte com maior chance de mudar. Os eventos trocados entre o ledger e o consolidado tendem a evoluir com o negócio: um campo novo, uma nova versão do evento (`.v1` para `.v2`), um formato de envelope diferente ou até a troca do broker (RabbitMQ por SQS ou Kafka). O mesmo vale para a API HTTP consumida por outros sistemas.
+
+A arquitetura hexagonal isola essas mudanças nas bordas do serviço. O domínio e os casos de uso não conhecem o formato dos eventos nem o protocolo de transporte: eles falam apenas com interfaces (ports), e a tradução entre o modelo interno e o contrato externo fica em um único adapter. Com isso, **uma alteração de contrato fica restrita a poucos arquivos, sempre na camada de adapters**, e o núcleo do negócio permanece intacto.
+
+| Mudança no contrato                              | O que precisa ser alterado                                                                                                                                        | O que não muda                                     |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Novo campo ou nova versão do evento (`.v2`)      | O schema em `packages/contracts` e o mapper que converte o evento de domínio no contrato (`ledger-event-mapper`); no consolidado, o adapter que recebe a mensagem | Entidades, value objects, regras e casos de uso    |
+| Publicar `v1` e `v2` ao mesmo tempo na transição | Apenas o mapper, que passa a gerar as duas versões a partir do mesmo evento de domínio                                                                            | Domínio, casos de uso e o outro serviço            |
+| Troca do broker (RabbitMQ por SQS ou Kafka)      | Um novo adapter que implementa o port `EventPublisher` (e, no consolidado, o adapter consumidor), escolhido na composição em `container.ts`/`relay.ts`            | Domínio, casos de uso, outbox e contratos          |
+| Nova rota, versão da API HTTP ou outro protocolo | Um adapter de entrada (rotas e schemas HTTP), que chama os mesmos casos de uso                                                                                    | Domínio e casos de uso                             |
+| Troca do banco de dados                          | Os adapters de repositório que implementam os ports de persistência                                                                                               | Domínio, casos de uso e testes unitários do núcleo |
+
+Benefícios adicionais:
+
+- **Testabilidade:** o núcleo é testado com fakes em memória, sem banco ou broker; os adapters têm testes de integração próprios contra infraestrutura real.
+- **Evolução independente:** cada serviço pode mudar sua implementação interna sem coordenar deploy com o outro, desde que o contrato publicado seja respeitado.
+- **Leitura clara:** a estrutura de pastas (`domain`, `application`, `adapters`) mostra onde cada tipo de mudança deve ser feito.
+
+O custo é mais interfaces e mais arquivos do que uma organização em camadas simples. Esse custo foi aceito porque é pequeno diante da redução do impacto das mudanças de contrato, que são frequentes em sistemas distribuídos.
+
 ### Padrões arquiteturais
 
 | Padrão                                                   | Problema que resolve                                                                                                                                                                                                                                                      |
