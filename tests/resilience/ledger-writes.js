@@ -3,7 +3,7 @@ import http from 'k6/http';
 import { Counter } from 'k6/metrics';
 import { authorized, tokenFor } from '../lib/auth.js';
 
-const LEDGER_URL = __ENV.LEDGER_URL || 'http://ledger:3000';
+const LEDGER_URL = 'http://ledger:3000';
 const RATE = Number(__ENV.RATE || 10);
 const DURATION = __ENV.DURATION || '90s';
 
@@ -28,7 +28,7 @@ export const options = {
   },
 };
 
-export const setup = () => ({ token: tokenFor(__ENV.USERNAME || 'operador.norte') });
+export const setup = () => ({ token: tokenFor('operador.norte') });
 
 export default (data) => {
   const amountInCents = 100 + Math.floor(Math.random() * 10_000);

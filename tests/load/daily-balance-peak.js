@@ -3,8 +3,8 @@ import http from 'k6/http';
 import { authorized, tokenFor } from '../lib/auth.js';
 import { businessDay } from '../lib/dates.js';
 
-const DAILY_BALANCE_URL = __ENV.DAILY_BALANCE_URL || 'http://daily-balance:3000';
-const LEDGER_URL = __ENV.LEDGER_URL || 'http://ledger:3000';
+const DAILY_BALANCE_URL = 'http://daily-balance:3000';
+const LEDGER_URL = 'http://ledger:3000';
 const RATE = Number(__ENV.RATE || 50);
 const DURATION = __ENV.DURATION || '2m';
 const WRITE_RATE = Number(__ENV.WRITE_RATE || 5);

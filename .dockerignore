@@ -3,5 +3,4 @@
 **/coverage
 .git
 .env
-docs
 *.md

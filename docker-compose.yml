@@ -18,9 +18,9 @@ services:
   postgres-ledger:
     <<: *postgres
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-cashflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cashflow}
-      POSTGRES_DB: ${LEDGER_DB:-ledger}
+      POSTGRES_USER: cashflow
+      POSTGRES_PASSWORD: cashflow
+      POSTGRES_DB: ledger
     ports:
       - '5432:5432'
     volumes:
@@ -29,9 +29,9 @@ services:
   postgres-daily-balance:
     <<: *postgres
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-cashflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cashflow}
-      POSTGRES_DB: ${DAILY_BALANCE_DB:-daily_balance}
+      POSTGRES_USER: cashflow
+      POSTGRES_PASSWORD: cashflow
+      POSTGRES_DB: daily_balance
     ports:
       - '5433:5432'
     volumes:
@@ -41,8 +41,8 @@ services:
     image: rabbitmq:4-management-alpine
     restart: unless-stopped
     environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-cashflow}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-cashflow}
+      RABBITMQ_DEFAULT_USER: cashflow
+      RABBITMQ_DEFAULT_PASS: cashflow
     ports:
       - '5672:5672'
       - '15672:15672'
@@ -70,12 +70,12 @@ services:
     command: ['start-dev', '--import-realm']
     restart: unless-stopped
     environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
-      KC_HOSTNAME: ${AUTH_PUBLIC_URL:-http://localhost:8180}
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8180
       KC_HEALTH_ENABLED: 'true'
     ports:
-      - '${KEYCLOAK_PORT:-8180}:8080'
+      - '8180:8080'
     volumes:
       - ./infra/keycloak:/opt/keycloak/data/import:ro
     healthcheck:
@@ -94,21 +94,16 @@ services:
       context: .
       args:
         SERVICE: ledger
-        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
     restart: unless-stopped
     environment:
       <<: *telemetry
       OTEL_SERVICE_NAME: ledger
       PORT: 3000
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-ledger:5432/${LEDGER_DB:-ledger}
-      DEFAULT_TIME_ZONE: ${DEFAULT_TIME_ZONE:-America/Sao_Paulo}
-      MAX_BACKDATED_DAYS: ${MAX_BACKDATED_DAYS:-30}
-      RATE_LIMIT_MAX: ${LEDGER_RATE_LIMIT_MAX:-1200}
-      AUTH_ISSUER: ${AUTH_PUBLIC_URL:-http://localhost:8180}/realms/cash-flow
+      DATABASE_URL: postgres://cashflow:cashflow@postgres-ledger:5432/ledger
+      AUTH_ISSUER: http://localhost:8180/realms/cash-flow
       AUTH_JWKS_URL: http://keycloak:8080/realms/cash-flow/protocol/openid-connect/certs
     ports:
-      - '${LEDGER_PORT:-3001}:3000'
+      - '3001:3000'
     depends_on:
       postgres-ledger:
         condition: service_healthy
@@ -118,18 +113,14 @@ services:
       context: .
       args:
         SERVICE: ledger
-        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
     command: ['node', '--import', './dist/telemetry.js', 'dist/relay.js']
     restart: unless-stopped
     environment:
       <<: *telemetry
       OTEL_SERVICE_NAME: ledger-outbox-relay
       PORT: 3000
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-ledger:5432/${LEDGER_DB:-ledger}
-      RABBITMQ_URL: amqp://${RABBITMQ_USER:-cashflow}:${RABBITMQ_PASSWORD:-cashflow}@rabbitmq:5672
-      OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-100}
-      OUTBOX_POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-500}
+      DATABASE_URL: postgres://cashflow:cashflow@postgres-ledger:5432/ledger
+      RABBITMQ_URL: amqp://cashflow:cashflow@rabbitmq:5672
     depends_on:
       ledger:
         condition: service_healthy
@@ -141,22 +132,18 @@ services:
       context: .
       args:
         SERVICE: daily-balance
-        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
     restart: unless-stopped
     environment:
       <<: *telemetry
       OTEL_SERVICE_NAME: daily-balance
       PORT: 3000
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-daily-balance:5432/${DAILY_BALANCE_DB:-daily_balance}
+      DATABASE_URL: postgres://cashflow:cashflow@postgres-daily-balance:5432/daily_balance
       REDIS_URL: redis://redis:6379
-      CACHE_FRESH_TTL_MS: ${CACHE_FRESH_TTL_MS:-5000}
-      CACHE_STALE_TTL_SECONDS: ${CACHE_STALE_TTL_SECONDS:-86400}
       RATE_LIMIT_MAX: ${DAILY_BALANCE_RATE_LIMIT_MAX:-6000}
-      AUTH_ISSUER: ${AUTH_PUBLIC_URL:-http://localhost:8180}/realms/cash-flow
+      AUTH_ISSUER: http://localhost:8180/realms/cash-flow
       AUTH_JWKS_URL: http://keycloak:8080/realms/cash-flow/protocol/openid-connect/certs
     ports:
-      - '${DAILY_BALANCE_PORT:-3002}:3000'
+      - '3002:3000'
     depends_on:
       postgres-daily-balance:
         condition: service_healthy
@@ -168,19 +155,14 @@ services:
       context: .
       args:
         SERVICE: daily-balance
-        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
     command: ['node', '--import', './dist/telemetry.js', 'dist/consumer.js']
     restart: unless-stopped
     environment:
       <<: *telemetry
       OTEL_SERVICE_NAME: daily-balance-consumer
       PORT: 3000
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-daily-balance:5432/${DAILY_BALANCE_DB:-daily_balance}
-      RABBITMQ_URL: amqp://${RABBITMQ_USER:-cashflow}:${RABBITMQ_PASSWORD:-cashflow}@rabbitmq:5672
-      CONSUMER_PREFETCH: ${CONSUMER_PREFETCH:-20}
-      CONSUMER_MAX_ATTEMPTS: ${CONSUMER_MAX_ATTEMPTS:-5}
-      CONSUMER_RETRY_DELAY_MS: ${CONSUMER_RETRY_DELAY_MS:-10000}
+      DATABASE_URL: postgres://cashflow:cashflow@postgres-daily-balance:5432/daily_balance
+      RABBITMQ_URL: amqp://cashflow:cashflow@rabbitmq:5672
     depends_on:
       daily-balance:
         condition: service_healthy
@@ -202,10 +184,7 @@ services:
   prometheus:
     image: prom/prometheus:v3.7.3
     restart: unless-stopped
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.retention.time=7d'
-      - '--web.enable-lifecycle'
+    command: ['--config.file=/etc/prometheus/prometheus.yml']
     volumes:
       - ./infra/prometheus:/etc/prometheus:ro
       - prometheus-data:/prometheus
@@ -245,10 +224,6 @@ services:
   k6:
     image: grafana/k6:1.4.2
     profiles: ['tools']
-    environment:
-      LEDGER_URL: http://ledger:3000
-      DAILY_BALANCE_URL: http://daily-balance:3000
-      KEYCLOAK_URL: http://keycloak:8080
     volumes:
       - ./tests:/scripts:ro
       - ./tests/results:/results

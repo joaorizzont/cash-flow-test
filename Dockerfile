@@ -1,15 +1,13 @@
 # syntax=docker/dockerfile:1.7
 FROM node:22-alpine AS build
 ARG SERVICE
-ARG NPM_REGISTRY=https://registry.npmjs.org/
-ENV npm_config_registry=${NPM_REGISTRY}
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/contracts/package.json packages/contracts/
 COPY services/ledger/package.json services/ledger/
 COPY services/daily-balance/package.json services/daily-balance/
 RUN --mount=type=cache,target=/root/.npm \
-  npm ci --no-audit --no-fund --fetch-retries=5 --fetch-retry-mintimeout=20000
+  npm ci --no-audit --no-fund
 COPY packages/contracts packages/contracts
 COPY services/${SERVICE} services/${SERVICE}
 RUN npm run build -w packages/contracts \

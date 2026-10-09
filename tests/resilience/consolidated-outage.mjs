@@ -2,13 +2,13 @@ import { readFile } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { compose, log, runK6 } from './compose.mjs';
 
-const KEYCLOAK_URL = process.env.KEYCLOAK_PUBLIC_URL ?? 'http://localhost:8180';
-const DAILY_BALANCE_URL = process.env.DAILY_BALANCE_PUBLIC_URL ?? 'http://localhost:3002';
+const KEYCLOAK_URL = 'http://localhost:8180';
+const DAILY_BALANCE_URL = 'http://localhost:3002';
 const USERNAME = 'operador.norte';
-const WRITE_RATE = process.env.RATE ?? '10';
+const WRITE_RATE = 10;
 const TEST_DURATION = '90s';
 const WARM_UP_MS = 20_000;
-const OUTAGE_MS = Number(process.env.OUTAGE_SECONDS ?? 30) * 1_000;
+const OUTAGE_MS = 30_000;
 const CATCH_UP_TIMEOUT_MS = 180_000;
 const SUMMARY_FILE = new URL('../results/resilience.json', import.meta.url);
 const CONSOLIDATED_SERVICES = ['postgres-daily-balance', 'daily-balance', 'daily-balance-consumer'];
