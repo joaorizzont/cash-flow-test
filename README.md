@@ -20,12 +20,11 @@ Os dois requisitos não funcionais do desafio são comprovados por testes automa
 5. [Segurança](#segurança)
 6. [Observabilidade](#observabilidade)
 7. [Resiliência e testes de carga](#resiliência-e-testes-de-carga)
-8. [Arquitetura de transição](#arquitetura-de-transição)
-9. [Como executar](#como-executar)
-10. [APIs](#apis)
-11. [CI/CD (proposta)](#cicd-proposta)
-12. [Testes E2E (proposta)](#testes-e2e-proposta)
-13. [Evoluções futuras](#evoluções-futuras)
+8. [Como executar](#como-executar)
+9. [APIs](#apis)
+10. [CI/CD (proposta)](#cicd-proposta)
+11. [Testes E2E (proposta)](#testes-e2e-proposta)
+12. [Evoluções futuras](#evoluções-futuras)
 
 ## Domínios e capacidades
 
@@ -271,19 +270,6 @@ DAILY_BALANCE_RATE_LIMIT_MAX=1000000 docker compose up -d daily-balance
 docker compose run --rm -e RATE=400 -e DURATION=60s k6 run /scripts/load/daily-balance-peak.js
 docker compose up -d daily-balance
 ```
-
-## Arquitetura de transição
-
-Se a solução substituir um sistema legado (por exemplo, um ERP monolítico em que o saldo é calculado por um batch noturno), a migração seria gradual, com **Strangler Fig** e uma camada anticorrupção, nunca de uma vez:
-
-| Etapa | Estado                                                                                                                                                     | Rollback                                   |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| T1    | CDC (Debezium) captura os lançamentos do legado e os publica no mesmo contrato de eventos; o consolidado novo roda em paralelo e é conciliado com o legado | Desligar o consumo; o legado segue intacto |
-| T2    | O ledger novo passa a receber os lançamentos, por coortes de comerciantes (1%, 10%, 50%, 100%), roteados no gateway; o legado é mantido em sincronia       | Voltar a coorte para o legado              |
-| T3    | Todos os comerciantes migrados; o histórico é importado de forma idempotente; o legado fica somente leitura                                                | Reativar a escrita no legado               |
-| T4    | Desligamento do legado e remoção dos adapters de transição                                                                                                 | —                                          |
-
-A idempotência por id do lançamento evita contagem dupla durante a convivência, e o comando de reconstrução de um dia permite recalcular saldos após a importação.
 
 ## Como executar
 
