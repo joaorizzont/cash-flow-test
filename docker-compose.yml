@@ -1,0 +1,102 @@
+name: cash-flow
+
+x-postgres: &postgres
+  image: postgres:17-alpine
+  restart: unless-stopped
+  healthcheck:
+    test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+    interval: 5s
+    timeout: 3s
+    retries: 10
+
+services:
+  postgres-ledger:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cashflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cashflow}
+      POSTGRES_DB: ${LEDGER_DB:-ledger}
+    ports:
+      - '5432:5432'
+    volumes:
+      - ledger-data:/var/lib/postgresql/data
+
+  postgres-daily-balance:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cashflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cashflow}
+      POSTGRES_DB: ${DAILY_BALANCE_DB:-daily_balance}
+    ports:
+      - '5433:5432'
+    volumes:
+      - daily-balance-data:/var/lib/postgresql/data
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-cashflow}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-cashflow}
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ledger:
+    build:
+      context: .
+      args:
+        SERVICE: ledger
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - '${LEDGER_PORT:-3001}:3000'
+    depends_on:
+      postgres-ledger:
+        condition: service_healthy
+
+  daily-balance:
+    build:
+      context: .
+      args:
+        SERVICE: daily-balance
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - '${DAILY_BALANCE_PORT:-3002}:3000'
+    depends_on:
+      postgres-daily-balance:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  ledger-data:
+  daily-balance-data:
+  rabbitmq-data:
