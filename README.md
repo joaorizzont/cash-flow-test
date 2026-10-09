@@ -483,3 +483,15 @@ Os testes de unidade, de integração e de carga já existem. Falta uma suíte E
 - Código sem comentários: nomes expressivos e funções pequenas tornam a intenção explícita.
 - SOLID e Clean Code, reforçados por regras de lint (complexidade máxima, número máximo de parâmetros).
 - Commits seguindo [Conventional Commits](https://www.conventionalcommits.org/).
+
+## Uso de IA no desenvolvimento
+
+Este projeto foi desenvolvido com o apoio do **Claude** (Anthropic) como assistente de engenharia. O uso de IA seguiu o mesmo processo em todas as etapas:
+
+1. **Discussão do problema:** analisávamos juntos o desafio, as alternativas e os trade-offs de cada decisão.
+2. **Definição dos requisitos:** antes de cada fase, registrávamos o que seria feito e os critérios para considerá-la concluída.
+3. **Implementação:** o Claude implementava a fase conforme os requisitos definidos.
+4. **Revisão e testes:** eu revisava o código e a documentação, executava os testes e validava o comportamento no ambiente local.
+5. **Confirmação:** cada fase só era consolidada em commit depois da minha revisão e aprovação.
+
+As decisões de arquitetura, o escopo e a validação final de cada entrega foram meus; a IA acelerou a implementação, a documentação e a verificação.
