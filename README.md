@@ -15,16 +15,18 @@ flowchart LR
   L --> LDB[("PostgreSQL<br/>ledger + outbox")]
   O["ledger-outbox-relay"] -->|lê pendentes| LDB
   O -. CloudEvents .-> B{{"RabbitMQ<br/>cash-flow.ledger.events"}}
-  B -. eventos .-> D
-  D --> DDB[("PostgreSQL<br/>daily_balance")]
+  B -. eventos .-> W["daily-balance-consumer"]
+  W -->|UPSERT aditivo| DDB[("PostgreSQL<br/>daily_balance")]
+  D --> DDB
   D --> R[("Redis")]
 ```
 
-| Serviço               | Responsabilidade                                                                                                                         | Porta local |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| `ledger`              | Registrar, estornar e consultar lançamentos. Publica eventos via outbox.                                                                 | `3001`      |
-| `ledger-outbox-relay` | Ler o outbox e publicar os eventos no RabbitMQ. Processo separado da API: uma falha na publicação nunca afeta o registro de lançamentos. | `—`         |
-| `daily-balance`       | Consumir eventos, manter o saldo diário materializado e servir o relatório.                                                              | `3002`      |
+| Serviço                  | Responsabilidade                                                                                                                            | Porta local |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `ledger`                 | Registrar, estornar e consultar lançamentos. Publica eventos via outbox.                                                                    | `3001`      |
+| `ledger-outbox-relay`    | Ler o outbox e publicar os eventos no RabbitMQ. Processo separado da API: uma falha na publicação nunca afeta o registro de lançamentos.    | `—`         |
+| `daily-balance`          | Servir o relatório de saldo diário a partir do modelo de leitura materializado (API completa na fase 5). Aplica as migrations do seu banco. | `3002`      |
+| `daily-balance-consumer` | Consumir os eventos do ledger e manter o saldo diário materializado. Processo separado da API: a carga de consumo não afeta as consultas.   | `—`         |
 
 ## Justificativa das decisões de arquitetura e tecnologia
 
@@ -72,7 +74,11 @@ O custo é mais interfaces e mais arquivos do que uma organização em camadas s
 | Comunicação assíncrona por eventos                       | O ledger não conhece nem espera o consolidado. Se o consolidado cair, os eventos ficam na fila e são processados quando ele voltar                                                                                                                                        |
 | Transactional Outbox                                     | Evita a escrita dupla (banco + broker). O lançamento e o evento são gravados na mesma transação; um relay publica depois. Nem o RabbitMQ fica no caminho crítico do registro                                                                                              |
 | CQRS com modelo de leitura materializado                 | O saldo diário é atualizado a cada evento, não calculado na consulta. A leitura vira uma busca por chave primária com cache, o que torna 50 req/s trivial e mantém a perda de requisições bem abaixo dos 5% tolerados                                                     |
-| Consumidor idempotente                                   | A entrega é _at-least-once_. A deduplicação por `event_id` na mesma transação da atualização garante que um evento repetido não altere o saldo duas vezes                                                                                                                 |
+| Consumidor idempotente                                   | A entrega é _at-least-once_. A deduplicação por `event_id` e por `entry_id`, na mesma transação da atualização do saldo, garante que um evento repetido (ou o mesmo lançamento publicado em duas versões de contrato) não altere o saldo duas vezes                       |
+| Diário de movimentos aplicados                           | Cada evento consolidado fica registrado na tabela `applied_movements`. Ela serve ao mesmo tempo para deduplicação e como fonte para reconstruir o saldo de um dia sem depender do ledger                                                                                  | Reconstruir a partir do ledger, o que acoplaria os serviços em tempo de execução                                      |
+| Retentativa por fila de espera e DLQ                     | Falhas transitórias vão para uma fila de espera com TTL e voltam à fila principal depois do atraso, sem laço quente nem bloqueio das demais mensagens. Mensagens inválidas ou que esgotam as tentativas vão para a DLQ com o motivo registrado                            | `nack` com reenfileiramento imediato, que gera laço quente enquanto o banco estiver fora                              |
+| Consumidor como processo separado                        | A API de consulta e o consumidor usam a mesma imagem, com comandos diferentes. Um pico de eventos não degrada as consultas e cada um escala de forma independente                                                                                                         | Consumidor dentro da API                                                                                              |
+| Adapters de infraestrutura duplicados entre serviços     | Conexão com o PostgreSQL, migrator e conexão com o RabbitMQ existem em cada serviço. Só os contratos de eventos são compartilhados, para que cada serviço evolua sua infraestrutura sem coordenar deploy com o outro                                                      | Biblioteca interna compartilhada, que reduziria código repetido ao custo de acoplar as versões dos serviços           |
 | CloudEvents como envelope dos eventos                    | Especificação aberta (CNCF) para metadados de eventos: `id`, `source`, `type`, `time` e `subject` têm significado padronizado e são entendidos por ferramentas de mercado                                                                                                 | Formato próprio, que exigiria documentar e manter cada campo de metadado                                              |
 | Pacote de contratos compartilhado (_published language_) | O ledger publica e o consolidado consome o mesmo schema TypeBox, versionado no nome do tipo (`.v1`). O pacote contém apenas schemas e validação, sem lógica de negócio, então não acopla os serviços                                                                      | Schema registry (ex.: Confluent, Apicurio), mais adequado quando há muitos times e serviços; registrado como evolução |
 | Relay como processo separado                             | A API e o relay usam a mesma imagem, com comandos diferentes. Escalam e falham de forma independente: se o relay cair, a API continua registrando e o backlog fica no outbox                                                                                              | Relay como tarefa em background dentro da API, que compartilharia recursos e ciclo de vida                            |
@@ -90,7 +96,7 @@ O custo é mais interfaces e mais arquivos do que uma organização em camadas s
 | Fastify                                    | Alto desempenho, validação de entrada por JSON Schema, logger estruturado (pino) nativo e testes sem abrir porta (`inject`)                                                                                            | Express (mais lento e sem validação nativa), NestJS (mais opinativo e pesado para o escopo)                     |
 | Zod                                        | Valida variáveis de ambiente na inicialização: o serviço falha rápido se estiver mal configurado                                                                                                                       | Leitura manual de `process.env`                                                                                 |
 | PostgreSQL 17, um por serviço              | ACID para o ledger; `CHECK` constraints; `FOR UPDATE SKIP LOCKED` para o outbox com várias instâncias; UPSERT aditivo para o consolidado; bancos separados preservam o isolamento                                      | MongoDB, DynamoDB (ver seção seguinte)                                                                          |
-| RabbitMQ 4                                 | Filas duráveis, DLQ nativa, simples de operar localmente. Na AWS, a mesma abstração é atendida por SNS + SQS                                                                                                           | Kafka, descartado porque o volume (dezenas de eventos por segundo) não justifica seu custo operacional          |
+| RabbitMQ 4                                 | Filas duráveis, DLQ nativa, simples de operar localmente. As filas do consumidor são _quorum queues_ (replicadas via Raft, recomendadas para dados críticos). Na AWS, a mesma abstração é atendida por SNS + SQS       | Kafka, descartado porque o volume (dezenas de eventos por segundo) não justifica seu custo operacional          |
 | Redis 7                                    | Cache de leitura do consolidado, reduzindo latência e carga no banco nos picos                                                                                                                                         | Cache em memória do processo, que não é compartilhado entre réplicas                                            |
 | node-postgres (`pg`) com SQL explícito     | Controle total sobre `FOR UPDATE SKIP LOCKED`, `ON CONFLICT` e transações; as consultas ficam visíveis e revisáveis                                                                                                    | ORMs como Prisma ou TypeORM, que escondem justamente as construções de concorrência das quais a solução depende |
 | Migrations versionadas no código           | Executadas na inicialização com `pg_advisory_lock`, então várias réplicas subindo juntas não aplicam a mesma migration duas vezes; por serem módulos TypeScript, vão compiladas na imagem sem cópia de arquivos extras | Ferramentas externas de migration, que adicionariam mais um passo ao deploy                                     |
@@ -136,6 +142,8 @@ O domínio é financeiro e transacional. Quase todas as garantias de que a solu�
 | Fusos no padrão IANA, não deslocamentos                   | `America/Manaus` carrega o histórico e as regras de horário de verão; `-04:00` não. Se o horário de verão voltar, basta atualizar a base de fusos do runtime, sem alterar código                                                                                       |
 | Instante em UTC + fuso gravado, sem hora local armazenada | A hora local é derivada do instante e do fuso, então armazená-la seria redundante e poderia divergir. Gravar o fuso vigente em cada lançamento garante que mudar a configuração do ponto de venda não reinterprete lançamentos passados                                |
 | O consolidado não lida com fusos                          | O evento carrega apenas a data de competência já resolvida. Toda a lógica de fuso fica no ledger, que é onde o lançamento nasce                                                                                                                                        |
+| Estorno consolidado como movimento do seu próprio tipo    | O estorno de um crédito chega como um débito de mesmo valor e mesma data. O consolidado apenas soma créditos e débitos: o saldo do dia é corrigido e os totais continuam mostrando o que de fato foi movimentado, como em um extrato                                   |
+| Saldo calculado pelo banco                                | `balance_cents` é uma coluna gerada (`total_credits_cents - total_debits_cents`), então o saldo nunca diverge dos totais                                                                                                                                               |
 | Idempotência por `Idempotency-Key`                        | Em rede instável o cliente não sabe se o lançamento foi gravado e repete a requisição. A chave, a resposta e o lançamento são gravados na mesma transação: uma retentativa devolve a resposta original e nunca duplica o lançamento, mesmo com requisições simultâneas |
 | Erros no padrão Problem Details (RFC 9457)                | Formato padronizado (`application/problem+json`) com um `code` estável que o cliente pode tratar; erros internos nunca expõem detalhes de implementação                                                                                                                |
 | Regras críticas também no banco                           | Constraints garantem as invariantes mesmo sob concorrência: valor positivo, um único estorno por lançamento (índice único) e ponto de venda pertencente ao mesmo comerciante (chave estrangeira composta)                                                              |
@@ -162,7 +170,10 @@ services/<service>/
 │  ├─ config/                 # leitura e validação de ambiente
 │  ├─ container.ts            # composition root: instancia adapters e injeta nos casos de uso
 │  ├─ main.ts                 # inicialização da API
-│  └─ relay.ts                # inicialização do relay do outbox (somente no ledger)
+│  ├─ relay.ts                # inicialização do relay do outbox (somente no ledger)
+│  ├─ consumer.ts             # inicialização do consumidor de eventos (somente no daily-balance)
+│  ├─ rebuild-day.ts          # comando de reconstrução do saldo de um dia (somente no daily-balance)
+│  └─ redrive-dead-letters.ts # comando que devolve mensagens da DLQ à fila (somente no daily-balance)
 └─ test/                      # espelha a estrutura de src/
 ```
 
@@ -210,23 +221,25 @@ docker compose down -v
 ```bash
 npm install
 cp services/ledger/.env.example services/ledger/.env
+cp services/daily-balance/.env.example services/daily-balance/.env
 docker compose up -d postgres-ledger postgres-daily-balance rabbitmq redis
 npm run dev -w services/ledger
 npm run dev:relay -w services/ledger
 npm run dev -w services/daily-balance
+npm run dev:consumer -w services/daily-balance
 ```
 
 As migrations do banco são aplicadas automaticamente na inicialização do serviço.
 
 ### Testes
 
-| Tipo       | Comando                                    | O que cobre                                                                                                                      |
-| ---------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| Unidade    | `npm test`                                 | Domínio, casos de uso e rotas HTTP com adapters em memória; não exige infraestrutura                                             |
-| Integração | `npm run test:integration`                 | Repositórios, outbox, migrations, idempotência, API e relay contra PostgreSQL e RabbitMQ reais via Testcontainers (exige Docker) |
-| Cobertura  | `npm run test:coverage -w services/ledger` | Relatório de cobertura dos testes de unidade                                                                                     |
+| Tipo       | Comando                                    | O que cobre                                                                                                                                  |
+| ---------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Unidade    | `npm test`                                 | Domínio, casos de uso, rotas HTTP e tratamento de mensagens com adapters em memória; não exige infraestrutura                                |
+| Integração | `npm run test:integration`                 | Repositórios, outbox, migrations, idempotência, API, relay e consumidor contra PostgreSQL e RabbitMQ reais via Testcontainers (exige Docker) |
+| Cobertura  | `npm run test:coverage -w services/ledger` | Relatório de cobertura dos testes de unidade                                                                                                 |
 
-Os testes de integração verificam inclusive cenários de concorrência e falha: duas requisições simultâneas com a mesma chave de idempotência gravam um único lançamento; dois estornos simultâneos resultam em um sucesso e um conflito; três relays em paralelo publicam cada evento exatamente uma vez; e um evento sem fila de destino fica pendente com nova tentativa agendada, sem bloquear os demais.
+Os testes de integração verificam inclusive cenários de concorrência e falha: duas requisições simultâneas com a mesma chave de idempotência gravam um único lançamento; dois estornos simultâneos resultam em um sucesso e um conflito; três relays em paralelo publicam cada evento exatamente uma vez; um evento sem fila de destino fica pendente com nova tentativa agendada, sem bloquear os demais. No consolidado: o mesmo evento entregue três vezes em paralelo é somado uma única vez; uma reconstrução executada durante o consumo termina com o saldo igual ao diário; falhas transitórias passam pela fila de espera e são aplicadas; e mensagens inválidas ou com tentativas esgotadas vão para a DLQ e podem ser devolvidas à fila.
 
 ### Comandos
 
@@ -422,7 +435,69 @@ O polling foi escolhido por ser o mais simples de operar e de testar, e por aten
 | Isolamento          | Um comerciante só acessa os próprios lançamentos                                                                                                                                                                                                                                                                          |
 | Consulta            | Por período de até 92 dias, paginada (máximo de 100 itens por página)                                                                                                                                                                                                                                                     |
 
-Cada lançamento registrado gera um evento de domínio (`EntryRecorded` ou `EntryReversed`), que será persistido no outbox e publicado para o serviço de consolidado.
+Cada lançamento registrado gera um evento de domínio (`EntryRecorded` ou `EntryReversed`), que é persistido no outbox e publicado para o serviço de consolidado.
+
+## Consolidação diária
+
+O `daily-balance-consumer` consome os eventos do ledger e mantém, para cada comerciante e dia de competência, o total de créditos, o total de débitos, o saldo e a quantidade de lançamentos. O saldo é atualizado a cada evento (modelo de leitura materializado), então a consulta do relatório não precisa somar lançamentos.
+
+```mermaid
+flowchart LR
+  X{{"cash-flow.ledger.events"}} -->|cashflow.ledger.entry.*.v1| Q["daily-balance.ledger-events"]
+  Q --> C["daily-balance-consumer"]
+  C -->|falha transitória| RQ["daily-balance.ledger-events.retry<br/>TTL"]
+  RQ -->|após o atraso| Q
+  C -->|inválida ou tentativas esgotadas| DLX{{"daily-balance.dead-letter"}}
+  DLX --> DLQ["daily-balance.ledger-events.dlq"]
+  C -->|transação única| DB[("applied_movements<br/>daily_balances")]
+```
+
+### Processamento de um evento
+
+1. Valida a mensagem contra o contrato `LedgerEventV1` do pacote `@cash-flow/contracts`.
+2. Traduz o evento em um comando da aplicação (camada anticorrupção: o domínio não conhece o formato do evento).
+3. Em uma única transação:
+   - registra o movimento em `applied_movements`, cuja chave primária é o `event_id` e que tem índice único em `entry_id`;
+   - se o registro já existia, o evento é uma duplicata e nada mais é feito;
+   - caso contrário, soma o movimento ao saldo do dia com um UPSERT aditivo (`INSERT ... ON CONFLICT DO UPDATE SET total = total + valor`), que é atômico mesmo com vários consumidores atualizando o mesmo dia.
+4. Confirma a mensagem (`ack`) somente depois do commit.
+
+### Tratamento de falhas
+
+| Situação                                                 | Tratamento                                                                                                                              |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Mensagem que não é JSON ou não segue o contrato          | Vai direto para a DLQ com o motivo no header `x-dead-letter-reason`, sem retentativas: repetir não resolveria                           |
+| Dados rejeitados pelo domínio (ex.: data inválida)       | Mesmo tratamento: DLQ imediata                                                                                                          |
+| Falha transitória (ex.: banco do consolidado fora)       | A mensagem vai para a fila de espera com `x-attempt` incrementado e volta à fila principal após `CONSUMER_RETRY_DELAY_MS` (padrão 10 s) |
+| Tentativas esgotadas (`CONSUMER_MAX_ATTEMPTS`, padrão 5) | DLQ com o último erro no motivo                                                                                                         |
+| Consumidor fora do ar                                    | As mensagens acumulam na fila durável e são processadas quando ele volta. O ledger continua registrando normalmente                     |
+| Queda do RabbitMQ ou do canal                            | O consumidor reconecta com backoff e volta a consumir; mensagens sem `ack` são reentregues e a deduplicação evita contagem dupla        |
+
+A republicação na fila de espera ou na DLQ usa publisher confirms, e a mensagem original só recebe `ack` depois da confirmação. Assim, nenhuma mensagem se perde nessas transições.
+
+### Operação
+
+Reconstruir o saldo de um dia a partir do diário de movimentos (por exemplo, após uma correção manual no banco):
+
+```bash
+docker compose exec daily-balance-consumer node dist/rebuild-day.js --merchant <merchant-id> --date 2026-10-09
+```
+
+A reconstrução trava a linha do dia antes de ler o diário. Por isso ela pode rodar com o consumidor ativo: um evento consolidado ao mesmo tempo entra no saldo reconstruído ou é somado depois dele, nunca é perdido nem contado duas vezes.
+
+Devolver as mensagens da DLQ para a fila principal depois de corrigir a causa (por exemplo, após uma queda longa do banco):
+
+```bash
+docker compose exec daily-balance-consumer node dist/redrive-dead-letters.js --limit 1000
+```
+
+As mensagens podem ser inspecionadas antes no RabbitMQ Management (http://localhost:15672), na fila `daily-balance.ledger-events.dlq`. Como o consumidor é idempotente, devolver uma mensagem já aplicada não altera o saldo.
+
+| Variável                  | Padrão  | Descrição                                          |
+| ------------------------- | ------- | -------------------------------------------------- |
+| `CONSUMER_PREFETCH`       | `20`    | Mensagens processadas em paralelo por réplica      |
+| `CONSUMER_MAX_ATTEMPTS`   | `5`     | Tentativas antes de enviar uma mensagem para a DLQ |
+| `CONSUMER_RETRY_DELAY_MS` | `10000` | Tempo que uma mensagem aguarda na fila de espera   |
 
 ## Roteiro de desenvolvimento
 
@@ -431,9 +506,9 @@ Cada lançamento registrado gera um evento de domínio (`EntryRecorded` ou `Entr
 | 0    | **Fundação**: monorepo com workspaces, TypeScript, lint, testes, Dockerfile multi-stage, Docker Compose com a infraestrutura, health checks, README                                  | ✅ Concluída |
 | 1    | **Domínio do ledger**: entidade de lançamento, value objects (dinheiro em centavos, tipo, data de competência), estorno, casos de uso e ports, testes unitários                      | ✅ Concluída |
 | 2    | **Adapters do ledger**: API HTTP, repositório PostgreSQL, migrations, idempotência (`Idempotency-Key`), tabela de outbox na mesma transação, testes de integração com Testcontainers | ✅ Concluída |
-| 3    | **Publicação de eventos**: contrato versionado dos eventos, outbox relay com `FOR UPDATE SKIP LOCKED`, publisher RabbitMQ, exchange e filas com DLQ                                  | ✅ Concluída |
-| 4    | **Consolidação diária**: domínio do saldo diário, consumidor idempotente por `event_id`, UPSERT aditivo, retentativas e DLQ, reprocessamento de um dia                               | ⏳ Próxima   |
-| 5    | **API do consolidado**: consulta por dia e por período, saldo acumulado, cache Redis com fallback para o banco e circuit breaker                                                     | Pendente     |
+| 3    | **Publicação de eventos**: contrato versionado dos eventos, outbox relay com `FOR UPDATE SKIP LOCKED`, publisher RabbitMQ com confirms e `mandatory`                                 | ✅ Concluída |
+| 4    | **Consolidação diária**: domínio do saldo diário, consumidor idempotente por `event_id`, UPSERT aditivo, retentativas e DLQ, reprocessamento de um dia                               | ✅ Concluída |
+| 5    | **API do consolidado**: consulta por dia e por período, saldo acumulado, cache Redis com fallback para o banco e circuit breaker                                                     | ⏳ Próxima   |
 | 6    | **Segurança**: Keycloak (OIDC), validação de JWT, escopos, `merchant_id` vindo do token, rate limiting, headers de segurança                                                         | Pendente     |
 | 7    | **Observabilidade**: OpenTelemetry (traces, métricas, logs), correlation id ponta a ponta, Prometheus, Grafana, Tempo e Loki, dashboards e alertas                                   | Pendente     |
 | 8    | **Resiliência e carga**: teste que derruba o consolidado e prova que o ledger continua respondendo; k6 com 50 req/s e limite de 5% de falhas                                         | Pendente     |

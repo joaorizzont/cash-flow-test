@@ -17,9 +17,11 @@ export const registerHealthRoutes = (
   app: FastifyInstance,
   indicators: readonly HealthIndicator[],
 ): void => {
-  app.get('/health/live', async () => ({ status: 'up' satisfies Status }));
+  const options = { logLevel: 'warn' } as const;
 
-  app.get('/health/ready', async (_request, reply) => {
+  app.get('/health/live', options, async () => ({ status: 'up' satisfies Status }));
+
+  app.get('/health/ready', options, async (_request, reply) => {
     const dependencies = await Promise.all(indicators.map(checkDependency));
     const isReady = dependencies.every((dependency) => dependency.status === 'up');
     const status: Status = isReady ? 'up' : 'down';

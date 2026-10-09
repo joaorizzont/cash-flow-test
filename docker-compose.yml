@@ -110,14 +110,35 @@ services:
     environment:
       PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-daily-balance:5432/${DAILY_BALANCE_DB:-daily_balance}
     ports:
       - '${DAILY_BALANCE_PORT:-3002}:3000'
     depends_on:
       postgres-daily-balance:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
       redis:
+        condition: service_healthy
+
+  daily-balance-consumer:
+    build:
+      context: .
+      args:
+        SERVICE: daily-balance
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+    command: ['node', 'dist/consumer.js']
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-daily-balance:5432/${DAILY_BALANCE_DB:-daily_balance}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-cashflow}:${RABBITMQ_PASSWORD:-cashflow}@rabbitmq:5672
+      CONSUMER_PREFETCH: ${CONSUMER_PREFETCH:-20}
+      CONSUMER_MAX_ATTEMPTS: ${CONSUMER_MAX_ATTEMPTS:-5}
+      CONSUMER_RETRY_DELAY_MS: ${CONSUMER_RETRY_DELAY_MS:-10000}
+    depends_on:
+      daily-balance:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
 
 volumes:

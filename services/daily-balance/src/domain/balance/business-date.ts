@@ -1,0 +1,27 @@
+import { ValidationError } from '../shared/validation-error.js';
+
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+const isCalendarDate = (value: string): boolean => {
+  const milliseconds = Date.parse(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(milliseconds) && new Date(milliseconds).toISOString().startsWith(value);
+};
+
+export class BusinessDate {
+  private constructor(readonly value: string) {}
+
+  static from(value: string): BusinessDate {
+    if (!ISO_DATE_PATTERN.test(value) || !isCalendarDate(value)) {
+      throw new ValidationError(`Invalid business date: ${value}`);
+    }
+    return new BusinessDate(value);
+  }
+
+  equals(other: BusinessDate): boolean {
+    return this.value === other.value;
+  }
+
+  toString(): string {
+    return this.value;
+  }
+}

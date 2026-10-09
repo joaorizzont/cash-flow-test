@@ -1,17 +1,29 @@
 import { buildHttpServer } from './adapters/inbound/http/server.js';
-import { loadEnv } from './config/env.js';
+import { dailyBalanceMigrations } from './adapters/outbound/postgres/migrations/index.js';
+import { createPool, PostgresDatabase } from './adapters/outbound/postgres/postgres-database.js';
+import { PostgresHealthIndicator } from './adapters/outbound/postgres/postgres-health-indicator.js';
+import { PostgresMigrator } from './adapters/outbound/postgres/postgres-migrator.js';
+import { loadApiEnv } from './config/env.js';
 
-const env = loadEnv();
+const env = loadApiEnv();
+
+const pool = createPool({
+  connectionString: env.DATABASE_URL,
+  maxConnections: env.DATABASE_POOL_SIZE,
+});
+await new PostgresMigrator(pool, dailyBalanceMigrations).migrate();
+const database = new PostgresDatabase(pool);
 
 const server = buildHttpServer({
   serviceName: env.SERVICE_NAME,
   logLevel: env.LOG_LEVEL,
-  healthIndicators: [],
+  healthIndicators: [new PostgresHealthIndicator(database)],
 });
 
 const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
   server.log.info({ signal }, 'shutting down');
   await server.close();
+  await database.close();
   process.exit(0);
 };
 
