@@ -296,8 +296,6 @@ docker compose ps
 | Prometheus          | http://localhost:9090                                  |
 | RabbitMQ Management | http://localhost:15672 (`cashflow`/`cashflow`)         |
 
-> **Rede corporativa ou VPN:** se o `npm ci` falhar no build com `Connection reset by peer`, informe um mirror do npm: `NPM_REGISTRY=https://registry.npmmirror.com/ docker compose up -d --build`.
-
 ### Usuários de demonstração
 
 Todos com a senha `cashflow`:
