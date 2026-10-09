@@ -24,7 +24,8 @@ Os dois requisitos não funcionais do desafio são comprovados por testes automa
 9. [Como executar](#como-executar)
 10. [APIs](#apis)
 11. [CI/CD (proposta)](#cicd-proposta)
-12. [Evoluções futuras](#evoluções-futuras)
+12. [Testes E2E (proposta)](#testes-e2e-proposta)
+13. [Evoluções futuras](#evoluções-futuras)
 
 ## Domínios e capacidades
 
@@ -412,12 +413,31 @@ flowchart LR
 
 As migrations são sempre compatíveis com a versão anterior (_expand/contract_), o que permite deploy sem parada e rollback seguro.
 
+## Testes E2E (proposta)
+
+Os testes de unidade, de integração e de carga já existem. Falta uma suíte E2E funcional, não implementada neste repositório, que exercite o sistema completo como um cliente real: login no Keycloak, chamadas HTTP ao ledger, evento passando por outbox, relay, RabbitMQ e consumidor, e conferência na API do consolidado.
+
+- **Ferramenta:** Vitest em `tests/e2e/`, contra o Docker Compose localmente e contra staging no pipeline (`npm run test:e2e`).
+- **Isolamento:** cada teste lê o saldo antes e confere a variação depois, então a suíte pode rodar várias vezes sem limpar os bancos.
+- **Assincronia:** um helper consulta o consolidado até o valor esperado aparecer, com timeout (a consolidação leva cerca de 0,5 s).
+
+| Cenário                                                             | O que prova                                      |
+| ------------------------------------------------------------------- | ------------------------------------------------ |
+| Venda registrada aparece no saldo do dia                            | Fluxo completo do ledger até o consolidado       |
+| Estorno anula o efeito da venda no saldo                            | Estorno de ponta a ponta                         |
+| POST repetido com a mesma `Idempotency-Key`                         | A retentativa não duplica no ledger nem no saldo |
+| Lançamento retroativo altera o saldo de abertura dos dias seguintes | Data de competência e saldo acumulado            |
+| Lançamento de um ponto de venda em `America/Manaus`                 | O fuso do ponto de venda define o dia do caixa   |
+| Analista consulta, mas recebe `403` ao registrar                    | Autorização por papel com token real             |
+| Outra loja não vê o lançamento nem o saldo                          | Isolamento entre comerciantes                    |
+| Resposta traz `x-trace-id` e o trace existe no Tempo                | Rastreabilidade de ponta a ponta                 |
+
 ## Evoluções futuras
 
 - **Mensageria:** adapters SNS + SQS para produção; CDC com Debezium no lugar do polling do outbox; limpeza periódica do outbox e das chaves de idempotência.
 - **Produto:** fechamento de períodos, categorias de lançamento, conciliação bancária, previsão de caixa e integrações com PDV e adquirentes.
 - **Plataforma:** implementação do pipeline de CI/CD descrito acima, infraestrutura como código (Terraform) e rate limiting compartilhado entre réplicas.
-- **Qualidade:** testes de contrato (Pact) para APIs e eventos e experimentos de caos no pipeline.
+- **Qualidade:** suíte E2E descrita acima, testes de contrato (Pact) para APIs e eventos e experimentos de caos no pipeline.
 
 ## Convenções
 
