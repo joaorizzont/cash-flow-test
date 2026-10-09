@@ -5,6 +5,8 @@ const envSchema = z.object({
   SERVICE_NAME: z.string().default('ledger'),
   PORT: z.coerce.number().int().positive().default(3000),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+  DATABASE_URL: z.string().min(1),
+  DATABASE_POOL_SIZE: z.coerce.number().int().positive().default(10),
   DEFAULT_TIME_ZONE: z.string().default('America/Sao_Paulo'),
   MAX_BACKDATED_DAYS: z.coerce.number().int().nonnegative().default(30),
 });

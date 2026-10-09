@@ -70,6 +70,9 @@ services:
     environment:
       PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://${POSTGRES_USER:-cashflow}:${POSTGRES_PASSWORD:-cashflow}@postgres-ledger:5432/${LEDGER_DB:-ledger}
+      DEFAULT_TIME_ZONE: ${DEFAULT_TIME_ZONE:-America/Sao_Paulo}
+      MAX_BACKDATED_DAYS: ${MAX_BACKDATED_DAYS:-30}
     ports:
       - '${LEDGER_PORT:-3001}:3000'
     depends_on:
