@@ -1,32 +1,32 @@
-# 06 — Security
+# 06 — Segurança
 
-This document describes how the cash flow solution protects its data and services, and which security criteria apply to every consumer of its services, whether synchronous (HTTP APIs) or asynchronous (events). Each item has a status:
+Este documento descreve como a solução de fluxo de caixa protege seus dados e serviços, e quais critérios de segurança se aplicam a todo consumidor dos seus serviços, seja síncrono (APIs HTTP) ou assíncrono (eventos). Cada item tem um status:
 
-- **Implemented**: present in this repository and covered by tests or verified in the Docker Compose environment.
-- **Recommended**: required before production, but outside the scope of the local environment.
+- **Implementado**: presente neste repositório e coberto por testes ou verificado no ambiente do Docker Compose.
+- **Recomendado**: necessário antes de ir para produção, mas fora do escopo do ambiente local.
 
-Related documents: [03-target-architecture.md](03-target-architecture.md), [07-operations.md](07-operations.md), [adr/0011-keycloak-jwt-scopes.md](adr/0011-keycloak-jwt-scopes.md) and [adr/0006-rabbitmq-message-broker.md](adr/0006-rabbitmq-message-broker.md).
+Documentos relacionados: [03-target-architecture.md](03-target-architecture.md), [07-operations.md](07-operations.md), [adr/0011-keycloak-jwt-scopes.md](adr/0011-keycloak-jwt-scopes.md) e [adr/0006-rabbitmq-message-broker.md](adr/0006-rabbitmq-message-broker.md).
 
-## 1. Assets and trust boundaries
+## 1. Ativos e fronteiras de confiança
 
-| Asset                | Why it matters                                                                                              |
-| -------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Ledger entries       | The source of truth of the merchant's cash flow. They must not be altered, lost or seen by another merchant |
-| Daily balances       | A derived read model. Wrong values mislead the merchant, but they can be rebuilt from the movement journal  |
-| Access tokens        | Bearer credentials. Whoever holds a valid token acts as the merchant until it expires                       |
-| Integration events   | Carry amounts, dates and the merchant id between the services                                               |
-| Credentials and keys | Database, broker, cache and identity provider secrets; token signing keys                                   |
+| Ativo                 | Por que importa                                                                                                                    |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Lançamentos do ledger | A fonte da verdade do fluxo de caixa do comerciante. Não podem ser alterados, perdidos nem vistos por outro comerciante            |
+| Saldos diários        | Um modelo de leitura derivado. Valores errados enganam o comerciante, mas podem ser reconstruídos a partir do diário de movimentos |
+| Tokens de acesso      | Credenciais do tipo bearer. Quem possui um token válido age como o comerciante até ele expirar                                     |
+| Eventos de integração | Carregam valores, datas e o id do comerciante entre os serviços                                                                    |
+| Credenciais e chaves  | Segredos do banco, do broker, do cache e do provedor de identidade; chaves de assinatura dos tokens                                |
 
 ```mermaid
 flowchart LR
   subgraph Internet
-    U([Merchant / client app])
-    P([Partner system])
+    U([Comerciante / aplicativo cliente])
+    P([Sistema parceiro])
   end
-  subgraph Edge["Edge (production)"]
-    W[WAF + API Gateway / ALB<br/>TLS termination]
+  subgraph Edge["Borda (produção)"]
+    W[WAF + API Gateway / ALB<br/>terminação TLS]
   end
-  subgraph Private["Private network"]
+  subgraph Private["Rede privada"]
     K[Keycloak]
     L[ledger]
     R[ledger-outbox-relay]
@@ -34,7 +34,7 @@ flowchart LR
     C[daily-balance-consumer]
     MQ[(RabbitMQ)]
     LDB[(PostgreSQL ledger)]
-    DDB[(PostgreSQL daily balance)]
+    DDB[(PostgreSQL consolidado)]
     RD[(Redis)]
   end
   U & P -->|HTTPS| W
@@ -48,193 +48,193 @@ flowchart LR
   L & D -. JWKS .-> K
 ```
 
-Trust boundaries: (1) internet to edge, (2) edge to the services, (3) services to their own data stores, and (4) producer to consumer through the broker. Each service only reaches its own database. The only shared channel between the two bounded contexts is the event contract.
+Fronteiras de confiança: (1) da internet para a borda, (2) da borda para os serviços, (3) dos serviços para seus próprios armazenamentos de dados e (4) do produtor para o consumidor, através do broker. Cada serviço só acessa o próprio banco. O único canal compartilhado entre os dois bounded contexts é o contrato de eventos.
 
-## 2. Authentication and authorization
+## 2. Autenticação e autorização
 
-### 2.1 Flow
+### 2.1 Fluxo
 
 ```mermaid
 sequenceDiagram
-  participant U as Client
+  participant U as Cliente
   participant K as Keycloak (realm cash-flow)
   participant A as ledger / daily-balance
-  U->>K: Authorization Code + PKCE (users) or Client Credentials (integrations)
-  K-->>U: Access token (JWT RS256, 5 min) with sub, merchant_id, scope, aud=cash-flow-api
-  U->>A: Request with Authorization: Bearer <token>
-  A->>K: GET JWKS (only on first use or for an unknown key id)
-  A->>A: Verify signature (RS256 only), iss, aud, exp (5 s tolerance), sub, merchant_id (UUID)
-  A->>A: Check the route's required scope
-  alt valid and authorized
-    A-->>U: 2xx, data of the token's merchant only
-  else missing or invalid token
+  U->>K: Authorization Code + PKCE (usuários) ou Client Credentials (integrações)
+  K-->>U: Access token (JWT RS256, 5 min) com sub, merchant_id, scope, aud=cash-flow-api
+  U->>A: Requisição com Authorization: Bearer <token>
+  A->>K: GET JWKS (só no primeiro uso ou para um key id desconhecido)
+  A->>A: Verifica assinatura (só RS256), iss, aud, exp (tolerância de 5 s), sub, merchant_id (UUID)
+  A->>A: Confere o escopo exigido pela rota
+  alt válido e autorizado
+    A-->>U: 2xx, apenas com dados do comerciante do token
+  else token ausente ou inválido
     A-->>U: 401 + WWW-Authenticate: Bearer (RFC 6750)
-  else missing scope
+  else escopo ausente
     A-->>U: 403 + error="insufficient_scope"
-  else keys unreachable
+  else chaves inacessíveis
     A-->>U: 503 AUTHENTICATION_UNAVAILABLE
   end
 ```
 
-### 2.2 Implemented controls
+### 2.2 Controles implementados
 
-| Control                             | Detail                                                                                                                                                                                 | Status      |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| Identity provider as code           | Realm in `infra/keycloak/cash-flow-realm.json`, imported on startup: client, roles, scopes, claim mappers, user profile                                                                | Implemented |
-| Local token validation              | `jose` validates RS256 signatures against the JWKS. No call to Keycloak per request; keys are cached in memory                                                                         | Implemented |
-| Algorithm pinning                   | Only `RS256` is accepted, which prevents `alg=none` and HMAC key-confusion attacks                                                                                                     | Implemented |
-| Issuer and audience                 | `iss` must equal `AUTH_ISSUER` and `aud` must contain `cash-flow-api` (audience mapper in the realm)                                                                                   | Implemented |
-| Expiration                          | 5-minute access tokens, `exp` checked with 5 s of clock tolerance                                                                                                                      | Implemented |
-| Merchant identity from the token    | `merchant_id` claim (UUID). The old `x-merchant-id` header was removed, and a test proves that a spoofed header is ignored                                                             | Implemented |
-| Merchant attribute protected        | The user profile declares `merchant_id` editable only by `admin`; unmanaged attributes are disabled, so users cannot change it in the account console (verified through the admin API) | Implemented |
-| Scope-based authorization per route | `ledger:write`, `ledger:read` and `balance:read`, checked by a Fastify hook from the route configuration                                                                               | Implemented |
-| Scopes bound to roles               | Keycloak only adds a scope to the token when the user has one of the mapped roles                                                                                                      | Implemented |
-| Tenant isolation                    | Every query filters by the token's `merchant_id`; another merchant's entry returns 404, so its existence is not revealed                                                               | Implemented |
-| Standard challenges                 | 401 with `WWW-Authenticate: Bearer realm="cash-flow"` and `error="invalid_token"`; 403 with `error="insufficient_scope"`                                                               | Implemented |
-| Brute force protection              | Enabled in the realm (`bruteForceProtected`)                                                                                                                                           | Implemented |
-| TLS required by the realm           | `sslRequired: external`: Keycloak requires HTTPS except from private networks                                                                                                          | Implemented |
-| Availability without Keycloak       | Services start without Keycloak. Already issued tokens keep working while it is down; JWKS fetch failure returns 503, not 500                                                          | Implemented |
-| Password grant disabled             | Enabled locally only to support the tests                                                                                                                                              | Recommended |
+| Controle                                 | Detalhe                                                                                                                                                                                                                 | Status       |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| Provedor de identidade como código       | Realm em `infra/keycloak/cash-flow-realm.json`, importado na subida: client, papéis, escopos, mapeadores de claims, perfil de usuário                                                                                   | Implementado |
+| Validação local do token                 | `jose` valida assinaturas RS256 contra o JWKS. Não há chamada ao Keycloak por requisição; as chaves ficam em cache na memória                                                                                           | Implementado |
+| Algoritmo fixado                         | Só `RS256` é aceito, o que impede ataques com `alg=none` e de confusão de chave HMAC                                                                                                                                    | Implementado |
+| Emissor e audiência                      | `iss` deve ser igual a `AUTH_ISSUER` e `aud` deve conter `cash-flow-api` (audience mapper no realm)                                                                                                                     | Implementado |
+| Expiração                                | Access tokens de 5 minutos, `exp` verificado com 5 s de tolerância de relógio                                                                                                                                           | Implementado |
+| Identidade do comerciante vinda do token | Claim `merchant_id` (UUID). O antigo header `x-merchant-id` foi removido, e um teste prova que um header forjado é ignorado                                                                                             | Implementado |
+| Atributo do comerciante protegido        | O perfil de usuário declara `merchant_id` editável apenas por `admin`; atributos não gerenciados estão desabilitados, então o usuário não consegue alterá-lo no console da conta (verificado pela API de administração) | Implementado |
+| Autorização por escopo em cada rota      | `ledger:write`, `ledger:read` e `balance:read`, verificados por um hook do Fastify a partir da configuração da rota                                                                                                     | Implementado |
+| Escopos vinculados a papéis              | O Keycloak só adiciona um escopo ao token quando o usuário tem um dos papéis mapeados                                                                                                                                   | Implementado |
+| Isolamento entre comerciantes            | Toda consulta filtra pelo `merchant_id` do token; o lançamento de outro comerciante retorna 404, sem revelar que ele existe                                                                                             | Implementado |
+| Desafios padronizados                    | 401 com `WWW-Authenticate: Bearer realm="cash-flow"` e `error="invalid_token"`; 403 com `error="insufficient_scope"`                                                                                                    | Implementado |
+| Proteção contra força bruta              | Habilitada no realm (`bruteForceProtected`)                                                                                                                                                                             | Implementado |
+| TLS exigido pelo realm                   | `sslRequired: external`: o Keycloak exige HTTPS, exceto a partir de redes privadas                                                                                                                                      | Implementado |
+| Disponibilidade sem o Keycloak           | Os serviços sobem sem o Keycloak. Tokens já emitidos continuam funcionando enquanto ele está fora; falha ao buscar o JWKS retorna 503, não 500                                                                          | Implementado |
+| Fluxo de senha desabilitado              | Habilitado localmente apenas para viabilizar os testes                                                                                                                                                                  | Recomendado  |
 
-| Scope          | Grants                                               | `merchant-operator` | `merchant-viewer` |
-| -------------- | ---------------------------------------------------- | ------------------- | ----------------- |
-| `ledger:write` | Record and reverse entries, configure points of sale | yes                 | no                |
-| `ledger:read`  | Read entries                                         | yes                 | yes               |
-| `balance:read` | Read consolidated daily balances                     | yes                 | yes               |
+| Escopo         | Permite                                                      | `merchant-operator` | `merchant-viewer` |
+| -------------- | ------------------------------------------------------------ | ------------------- | ----------------- |
+| `ledger:write` | Registrar e estornar lançamentos, configurar pontos de venda | sim                 | não               |
+| `ledger:read`  | Consultar lançamentos                                        | sim                 | sim               |
+| `balance:read` | Consultar os saldos diários consolidados                     | sim                 | sim               |
 
-## 3. Threat model (STRIDE)
+## 3. Modelo de ameaças (STRIDE)
 
-| Threat                                      | Asset or flow     | Mitigation                                                                                                                                                          | Status                                  |
-| ------------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
-| **S**poofing a merchant                     | APIs              | Merchant taken only from the signed token's `merchant_id`; header removed; attribute editable only by admins                                                        | Implemented                             |
-| **S**poofing with a forged token            | APIs              | RS256 signature against the JWKS, `iss` and `aud` checks, algorithm pinned                                                                                          | Implemented                             |
-| **S**poofing a producer on the broker       | Events            | Dedicated broker user per service with least privilege (section 4.2)                                                                                                | Recommended                             |
-| **T**ampering with ledger history           | Entries           | Entries are immutable and corrected only by reversal; DB constraints (positive amounts, single reversal through a unique index, composite FK for the point of sale) | Implemented                             |
-| **T**ampering with requests in transit      | All HTTP traffic  | TLS at the gateway or ALB; HSTS header already sent                                                                                                                 | HSTS implemented; TLS recommended       |
-| **T**ampering with events                   | Events            | Contract validation (`isLedgerEventV1`); invalid messages go to the DLQ with the reason; TLS on AMQP in production                                                  | Validation implemented; TLS recommended |
-| **R**epudiation of an operation             | Entries           | `recordedAt` (UTC) and time zone stored per entry; reversal references the original; trace id per request; token `sub` available for audit logging                  | Partially implemented                   |
-| **I**nformation disclosure across merchants | Entries, balances | Every query filtered by merchant; 404 for entries of other merchants; cache keys include the merchant id                                                            | Implemented                             |
-| **I**nformation disclosure in errors        | APIs              | Problem Details with a stable `code`; unexpected errors return only `INTERNAL_ERROR`, with details in the logs                                                      | Implemented                             |
-| **I**nformation disclosure in logs          | Logs              | Fastify's default request serializer logs method, URL and remote address, not headers, so tokens are not logged; rejected tokens log only the reason                | Implemented                             |
-| **D**enial of service by volume             | APIs              | Rate limiting per merchant (ledger 1,200 req/min, daily balance 6,000 req/min) returning 429 with `Retry-After`; WAF and gateway quotas in production               | App limit implemented; edge recommended |
-| **D**enial of service with large payloads   | Ledger            | 16 KiB body limit (413); JSON Schema validation with `additionalProperties: false`                                                                                  | Implemented                             |
-| **D**enial of service through a dependency  | Daily balance     | Circuit breakers and timeouts on Redis and PostgreSQL; stale cache fallback                                                                                         | Implemented                             |
-| **D**uplicate side effects                  | Writes and events | `Idempotency-Key` stored atomically with the response; event deduplication by event id and entry id                                                                 | Implemented                             |
-| **E**levation of privilege                  | APIs              | Per-route scopes; viewer role cannot obtain `ledger:write`                                                                                                          | Implemented                             |
-| **E**levation inside the container          | Runtime           | Images run as the non-root `node` user; minimal `node:22-alpine` base; production dependencies only                                                                 | Implemented                             |
+| Ameaça                                                   | Ativo ou fluxo      | Mitigação                                                                                                                                                                           | Status                                              |
+| -------------------------------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| **S**poofing: se passar por um comerciante               | APIs                | Comerciante obtido apenas do `merchant_id` do token assinado; header removido; atributo editável apenas por administradores                                                         | Implementado                                        |
+| **S**poofing: token forjado                              | APIs                | Assinatura RS256 contra o JWKS, verificação de `iss` e `aud`, algoritmo fixado                                                                                                      | Implementado                                        |
+| **S**poofing: se passar por um produtor no broker        | Eventos             | Usuário de broker dedicado por serviço, com privilégio mínimo (seção 4.2)                                                                                                           | Recomendado                                         |
+| **T**ampering: adulterar o histórico do ledger           | Lançamentos         | Lançamentos imutáveis, corrigidos apenas por estorno; constraints no banco (valores positivos, estorno único por índice único, FK composta para o ponto de venda)                   | Implementado                                        |
+| **T**ampering: adulterar requisições em trânsito         | Todo o tráfego HTTP | TLS no gateway ou no ALB; o header HSTS já é enviado                                                                                                                                | HSTS implementado; TLS recomendado                  |
+| **T**ampering: adulterar eventos                         | Eventos             | Validação do contrato (`isLedgerEventV1`); mensagens inválidas vão para a DLQ com o motivo; TLS no AMQP em produção                                                                 | Validação implementada; TLS recomendado             |
+| **R**epudiation: negar uma operação                      | Lançamentos         | `recordedAt` (UTC) e fuso horário gravados por lançamento; o estorno referencia o original; trace id por requisição; `sub` do token disponível para log de auditoria                | Parcialmente implementado                           |
+| **I**nformation disclosure: vazamento entre comerciantes | Lançamentos, saldos | Toda consulta filtrada por comerciante; 404 para lançamentos de outros comerciantes; as chaves de cache incluem o id do comerciante                                                 | Implementado                                        |
+| **I**nformation disclosure: vazamento em erros           | APIs                | Problem Details com `code` estável; erros inesperados retornam apenas `INTERNAL_ERROR`, com os detalhes nos logs                                                                    | Implementado                                        |
+| **I**nformation disclosure: vazamento em logs            | Logs                | O serializador padrão de requisições do Fastify registra método, URL e endereço remoto, não os headers, então os tokens não vão para o log; tokens rejeitados registram só o motivo | Implementado                                        |
+| **D**enial of service: negação de serviço por volume     | APIs                | Rate limiting por comerciante (ledger 1.200 req/min, consolidado 6.000 req/min) retornando 429 com `Retry-After`; WAF e cotas no gateway em produção                                | Limite na aplicação implementado; borda recomendada |
+| **D**enial of service: payloads grandes                  | Ledger              | Limite de corpo de 16 KiB (413); validação por JSON Schema com `additionalProperties: false`                                                                                        | Implementado                                        |
+| **D**enial of service: através de uma dependência        | Consolidado         | Circuit breakers e timeouts no Redis e no PostgreSQL; fallback para o cache obsoleto                                                                                                | Implementado                                        |
+| **D**enial of service: efeitos colaterais duplicados     | Gravações e eventos | `Idempotency-Key` gravada atomicamente com a resposta; deduplicação de eventos por id do evento e id do lançamento                                                                  | Implementado                                        |
+| **E**levation of privilege: elevação de privilégio       | APIs                | Escopos por rota; o papel de visualizador não consegue obter `ledger:write`                                                                                                         | Implementado                                        |
+| **E**levation of privilege: dentro do container          | Execução            | As imagens rodam com o usuário não-root `node`; base mínima `node:22-alpine`; só dependências de produção                                                                           | Implementado                                        |
 
-## 4. Security criteria for consuming the services (integration)
+## 4. Critérios de segurança para consumo dos serviços (integração)
 
-These criteria apply to any system that consumes the solution, whether internal or external. They are the conditions an integration must meet before it is enabled.
+Estes critérios valem para qualquer sistema que consuma a solução, interno ou externo. São as condições que uma integração precisa atender antes de ser habilitada.
 
-### 4.1 Synchronous APIs (external and partner consumers)
+### 4.1 APIs síncronas (consumidores externos e parceiros)
 
-| Criterion                 | Rule                                                                                                                                                                               | Status                  |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| One identity per consumer | Every integration gets its own confidential OAuth 2.0 client using **Client Credentials**. No shared clients and no user passwords in systems                                      | Recommended             |
-| Least privilege           | The client receives only the scopes it needs (for example, a reporting system gets `balance:read` only)                                                                            | Model implemented       |
-| Merchant binding          | A client-credentials token carries a fixed `merchant_id` through a hardcoded claim mapper, so a partner can never act for another merchant                                         | Recommended             |
-| Short-lived tokens        | Access tokens of at most 5 minutes; no refresh tokens for machine clients                                                                                                          | Implemented (realm)     |
-| Audience restriction      | Tokens must contain `aud=cash-flow-api`; tokens issued for other APIs are rejected                                                                                                 | Implemented             |
-| Transport security        | TLS 1.2+ only. **mTLS** for B2B partners at the gateway, with certificate pinning per client                                                                                       | Recommended             |
-| Network restriction       | IP allow lists per partner at the gateway or WAF                                                                                                                                   | Recommended             |
-| Quotas and rate limits    | Per merchant in the application (implemented) plus per client and per IP at the gateway                                                                                            | Partially implemented   |
-| Idempotency on writes     | `Idempotency-Key` is **mandatory** for integration clients on `POST` (optional for interactive users); retries return the original response                                        | Implemented (supported) |
-| Contract validation       | Requests validated by JSON Schema; unknown fields rejected; the OpenAPI document at `/docs` is the contract                                                                        | Implemented             |
-| Versioning                | URL versioning (`/v1`); breaking changes only in a new version, with a deprecation window announced to consumers                                                                   | Implemented (`/v1`)     |
-| Optional request signing  | For high-value partners, an HMAC signature of method, path, body hash and timestamp in a header, checked at the gateway                                                            | Recommended             |
-| Webhooks (if added)       | Payload signed with HMAC-SHA256 using a per-subscriber secret; timestamp and event id in the signature to prevent replay; reject events older than 5 minutes; retries with backoff | Recommended             |
-| Error handling contract   | Problem Details (RFC 9457) with a stable `code`; consumers must honor `Retry-After` on 429 and 503                                                                                 | Implemented             |
+| Critério                           | Regra                                                                                                                                                                                          | Status                    |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| Uma identidade por consumidor      | Cada integração recebe seu próprio client OAuth 2.0 confidencial usando **Client Credentials**. Nada de clients compartilhados nem de senhas de usuário em sistemas                            | Recomendado               |
+| Privilégio mínimo                  | O client recebe apenas os escopos de que precisa (por exemplo, um sistema de relatórios recebe só `balance:read`)                                                                              | Modelo implementado       |
+| Vínculo com o comerciante          | Um token de client credentials carrega um `merchant_id` fixo, por meio de um hardcoded claim mapper, para que um parceiro nunca possa agir em nome de outro comerciante                        | Recomendado               |
+| Tokens de vida curta               | Access tokens de no máximo 5 minutos; sem refresh tokens para clients de máquina                                                                                                               | Implementado (realm)      |
+| Restrição de audiência             | Os tokens precisam conter `aud=cash-flow-api`; tokens emitidos para outras APIs são rejeitados                                                                                                 | Implementado              |
+| Segurança do transporte            | Apenas TLS 1.2+. **mTLS** para parceiros B2B no gateway, com certificate pinning por client                                                                                                    | Recomendado               |
+| Restrição de rede                  | Listas de IPs permitidos por parceiro no gateway ou no WAF                                                                                                                                     | Recomendado               |
+| Cotas e rate limits                | Por comerciante na aplicação (implementado) mais por client e por IP no gateway                                                                                                                | Parcialmente implementado |
+| Idempotência nas gravações         | `Idempotency-Key` é **obrigatória** para clients de integração em `POST` (opcional para usuários interativos); retentativas devolvem a resposta original                                       | Implementado (suportado)  |
+| Validação do contrato              | Requisições validadas por JSON Schema; campos desconhecidos são rejeitados; o documento OpenAPI em `/docs` é o contrato                                                                        | Implementado              |
+| Versionamento                      | Versionamento na URL (`/v1`); mudanças incompatíveis só em uma nova versão, com prazo de descontinuação comunicado aos consumidores                                                            | Implementado (`/v1`)      |
+| Assinatura opcional de requisições | Para parceiros de alto valor, uma assinatura HMAC de método, path, hash do corpo e timestamp em um header, verificada no gateway                                                               | Recomendado               |
+| Webhooks (se forem adicionados)    | Payload assinado com HMAC-SHA256 usando um segredo por assinante; timestamp e id do evento na assinatura para impedir replay; rejeitar eventos com mais de 5 minutos; retentativas com backoff | Recomendado               |
+| Contrato de tratamento de erros    | Problem Details (RFC 9457) com `code` estável; os consumidores devem respeitar `Retry-After` em 429 e 503                                                                                      | Implementado              |
 
-### 4.2 Asynchronous integration (events)
+### 4.2 Integração assíncrona (eventos)
 
-| Criterion                    | Rule                                                                                                                                                                                                                           | Status                        |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------- |
-| Dedicated broker credentials | One RabbitMQ user per process (relay, consumer); no shared administrator user (the local environment uses a single user)                                                                                                       | Recommended                   |
-| Least-privilege permissions  | Relay: _write_ only on the exchange `cash-flow.ledger.events`. Consumer: _read_ on its queues, _write_ only on its retry queue and dead-letter exchange, _configure_ only on its own resources. Separate vhost per environment | Recommended                   |
-| Encrypted transport          | `amqps://` (TLS) in production; Amazon MQ enforces it                                                                                                                                                                          | Recommended                   |
-| Contract validation          | Every message validated against `LedgerEventV1` from `@cash-flow/contracts`; invalid messages go to the DLQ with `x-dead-letter-reason`                                                                                        | Implemented                   |
-| Deduplication                | Consumer deduplicates by event id and entry id in the same transaction as the balance update                                                                                                                                   | Implemented                   |
-| Delivery guarantees          | Publisher confirms and `mandatory` publishing; persistent messages; quorum queues                                                                                                                                              | Implemented                   |
-| Data minimization            | Events carry only identifiers, type, amount, currency and business date: **no description and no personal data**                                                                                                               | Implemented                   |
-| Schema evolution             | Additive changes only within a version; breaking changes create a new event type (`.v2`); producers may publish both versions during a transition                                                                              | Implemented (versioned types) |
-| Traceability                 | `traceparent` attribute (CloudEvents distributed tracing) and event id as `messageId`                                                                                                                                          | Implemented                   |
+| Critério                        | Regra                                                                                                                                                                                                                                     | Status                           |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| Credenciais de broker dedicadas | Um usuário do RabbitMQ por processo (relay, consumidor); nenhum usuário administrador compartilhado (o ambiente local usa um único usuário)                                                                                               | Recomendado                      |
+| Permissões de privilégio mínimo | Relay: _write_ apenas no exchange `cash-flow.ledger.events`. Consumidor: _read_ nas suas filas, _write_ apenas na sua fila de espera e no seu dead-letter exchange, _configure_ apenas nos próprios recursos. Vhost separado por ambiente | Recomendado                      |
+| Transporte criptografado        | `amqps://` (TLS) em produção; o Amazon MQ o exige                                                                                                                                                                                         | Recomendado                      |
+| Validação do contrato           | Toda mensagem é validada contra `LedgerEventV1` de `@cash-flow/contracts`; mensagens inválidas vão para a DLQ com `x-dead-letter-reason`                                                                                                  | Implementado                     |
+| Deduplicação                    | O consumidor deduplica por id do evento e id do lançamento, na mesma transação da atualização do saldo                                                                                                                                    | Implementado                     |
+| Garantias de entrega            | Publisher confirms e publicação com `mandatory`; mensagens persistentes; quorum queues                                                                                                                                                    | Implementado                     |
+| Minimização de dados            | Os eventos carregam apenas identificadores, tipo, valor, moeda e data de competência: **nenhuma descrição e nenhum dado pessoal**                                                                                                         | Implementado                     |
+| Evolução do schema              | Apenas mudanças aditivas dentro de uma versão; mudanças incompatíveis criam um novo tipo de evento (`.v2`); os produtores podem publicar as duas versões durante uma transição                                                            | Implementado (tipos versionados) |
+| Rastreabilidade                 | Atributo `traceparent` (distributed tracing do CloudEvents) e id do evento como `messageId`                                                                                                                                               | Implementado                     |
 
-### 4.3 Internal service-to-service communication
+### 4.3 Comunicação interna entre serviços
 
-| Criterion               | Rule                                                                                                                                  | Status                     |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| No synchronous coupling | The two bounded contexts never call each other over HTTP; they share only events                                                      | Implemented                |
-| Network segmentation    | Services in private subnets; databases, broker and cache reachable only from the services that own them (security groups per service) | Recommended                |
-| Database isolation      | One database per service, with its own credentials; the consumer cannot read the ledger database                                      | Implemented (separate DBs) |
-| Zero trust direction    | mTLS between services through a service mesh (for example, App Mesh or Istio) if synchronous internal calls are introduced            | Recommended                |
+| Critério                 | Regra                                                                                                                                     | Status                          |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| Sem acoplamento síncrono | Os dois bounded contexts nunca se chamam por HTTP; compartilham apenas eventos                                                            | Implementado                    |
+| Segmentação de rede      | Serviços em sub-redes privadas; bancos, broker e cache acessíveis apenas pelos serviços que são donos deles (security groups por serviço) | Recomendado                     |
+| Isolamento dos bancos    | Um banco por serviço, com credenciais próprias; o consumidor não consegue ler o banco do ledger                                           | Implementado (bancos separados) |
+| Direção zero trust       | mTLS entre serviços por meio de um service mesh (por exemplo, App Mesh ou Istio), caso sejam introduzidas chamadas internas síncronas     | Recomendado                     |
 
-## 5. Data protection
+## 5. Proteção de dados
 
-| Topic                                | Approach                                                                                                                                                                                                                                                                                                         | Status      |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| Encryption in transit                | TLS at the edge (ALB or API Gateway with ACM certificates); TLS to RDS (`sslmode=verify-full`), ElastiCache (in-transit encryption) and the broker (`amqps`)                                                                                                                                                     | Recommended |
-| Encryption at rest                   | KMS customer managed keys for RDS, ElastiCache, S3 (traces and backups), EBS and CloudWatch Logs                                                                                                                                                                                                                 | Recommended |
-| Backups                              | Encrypted automatic RDS backups, point-in-time recovery, retention defined by the business; restore tested periodically (see [07-operations.md](07-operations.md))                                                                                                                                               | Recommended |
-| Data minimization                    | Amounts in integer cents, dates and identifiers. The free-text `description` is the only field that could contain personal data, and it is limited to 140 characters and never published in events                                                                                                               | Implemented |
-| LGPD                                 | The merchant is the data controller of its customers' data. Keep data in sa-east-1; register the legal basis; log access to personal data; define retention                                                                                                                                                      | Recommended |
-| Right to erasure vs immutable ledger | Ledger entries cannot be deleted without breaking the audit trail. Recommended approach: keep descriptions free of personal data by policy; if personal data must be stored, store it encrypted with a per-subject key and delete the key on request (**crypto-shredding**), leaving the financial record intact | Recommended |
-| Logs                                 | No tokens, no request bodies and no descriptions in logs; only identifiers and trace ids                                                                                                                                                                                                                         | Implemented |
+| Tema                                       | Abordagem                                                                                                                                                                                                                                                                                                                                                                     | Status       |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| Criptografia em trânsito                   | TLS na borda (ALB ou API Gateway com certificados do ACM); TLS para o RDS (`sslmode=verify-full`), o ElastiCache (criptografia em trânsito) e o broker (`amqps`)                                                                                                                                                                                                              | Recomendado  |
+| Criptografia em repouso                    | Chaves KMS gerenciadas pelo cliente para RDS, ElastiCache, S3 (traces e backups), EBS e CloudWatch Logs                                                                                                                                                                                                                                                                       | Recomendado  |
+| Backups                                    | Backups automáticos e criptografados do RDS, point-in-time recovery, retenção definida pelo negócio; restauração testada periodicamente (veja [07-operations.md](07-operations.md))                                                                                                                                                                                           | Recomendado  |
+| Minimização de dados                       | Valores em centavos inteiros, datas e identificadores. O campo de texto livre `description` é o único que poderia conter dados pessoais; ele é limitado a 140 caracteres e nunca é publicado em eventos                                                                                                                                                                       | Implementado |
+| LGPD                                       | O comerciante é o controlador dos dados dos seus clientes. Manter os dados em sa-east-1; registrar a base legal; registrar o acesso a dados pessoais; definir a retenção                                                                                                                                                                                                      | Recomendado  |
+| Direito ao esquecimento vs ledger imutável | Os lançamentos do ledger não podem ser apagados sem quebrar a trilha de auditoria. Abordagem recomendada: por política, manter as descrições livres de dados pessoais; se dados pessoais precisarem ser guardados, armazená-los criptografados com uma chave por titular e apagar a chave mediante solicitação (**crypto-shredding**), mantendo o registro financeiro intacto | Recomendado  |
+| Logs                                       | Nada de tokens, corpos de requisição ou descrições nos logs; apenas identificadores e trace ids                                                                                                                                                                                                                                                                               | Implementado |
 
-## 6. Secrets management
+## 6. Gestão de segredos
 
-| Environment  | Approach                                                                                                                                                       | Status      |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| Local        | Defaults in `docker-compose.yml` and `.env.example` (`cashflow`/`cashflow`, `admin`/`admin`). Development only                                                 | Implemented |
-| Production   | AWS Secrets Manager with automatic rotation for database credentials; injected into ECS tasks as secrets; IAM task roles with access to only their own secrets | Recommended |
-| Images       | No secrets in images or in the repository; configuration validated at startup with Zod (the service fails fast if misconfigured)                               | Implemented |
-| Signing keys | Managed by Keycloak, with periodic key rotation; services pick up new keys automatically through the JWKS (unknown `kid` triggers a refetch)                   | Supported   |
+| Ambiente             | Abordagem                                                                                                                                                            | Status       |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| Local                | Valores padrão em `docker-compose.yml` e `.env.example` (`cashflow`/`cashflow`, `admin`/`admin`). Somente para desenvolvimento                                       | Implementado |
+| Produção             | AWS Secrets Manager com rotação automática das credenciais de banco; injetados nas tasks do ECS como secrets; IAM task roles com acesso apenas aos próprios segredos | Recomendado  |
+| Imagens              | Nenhum segredo nas imagens nem no repositório; configuração validada na subida com Zod (o serviço falha rápido se estiver mal configurado)                           | Implementado |
+| Chaves de assinatura | Gerenciadas pelo Keycloak, com rotação periódica; os serviços passam a usar as novas chaves automaticamente pelo JWKS (um `kid` desconhecido dispara uma nova busca) | Suportado    |
 
-## 7. Supply chain and pipeline
+## 7. Cadeia de suprimentos e pipeline
 
-| Control                                                                               | Status                       |
-| ------------------------------------------------------------------------------------- | ---------------------------- |
-| Reproducible installs with `npm ci` and a committed lockfile                          | Implemented                  |
-| Multi-stage Dockerfile, production dependencies only, `node:22-alpine`, non-root user | Implemented                  |
-| Static analysis with strict TypeScript and ESLint                                     | Implemented                  |
-| Dependency updates (Dependabot or Renovate)                                           | Planned for Phase 10 (CI/CD) |
-| `npm audit` in the pipeline                                                           | Planned for Phase 10         |
-| CodeQL code scanning                                                                  | Planned for Phase 10         |
-| Trivy image and dependency scanning                                                   | Planned for Phase 10         |
-| SBOM generation (CycloneDX or SPDX)                                                   | Recommended                  |
-| Signed images (cosign) and verification at deploy time                                | Recommended                  |
-| Pinned image versions in Compose (no `latest`)                                        | Implemented                  |
+| Controle                                                                                    | Status                           |
+| ------------------------------------------------------------------------------------------- | -------------------------------- |
+| Instalações reproduzíveis com `npm ci` e lockfile versionado                                | Implementado                     |
+| Dockerfile multi-stage, apenas dependências de produção, `node:22-alpine`, usuário não-root | Implementado                     |
+| Análise estática com TypeScript estrito e ESLint                                            | Implementado                     |
+| Atualização de dependências (Dependabot ou Renovate)                                        | Planejado para a Fase 10 (CI/CD) |
+| `npm audit` no pipeline                                                                     | Planejado para a Fase 10         |
+| Análise de código com CodeQL                                                                | Planejado para a Fase 10         |
+| Análise de imagens e dependências com Trivy                                                 | Planejado para a Fase 10         |
+| Geração de SBOM (CycloneDX ou SPDX)                                                         | Recomendado                      |
+| Imagens assinadas (cosign) e verificação no deploy                                          | Recomendado                      |
+| Versões de imagem fixadas no Compose (sem `latest`)                                         | Implementado                     |
 
-## 8. Audit and security monitoring
+## 8. Auditoria e monitoramento de segurança
 
-| Capability                | Detail                                                                                                                                | Status      |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| Audit trail of the ledger | Immutable entries; corrections only through reversals that reference the original; `recordedAt` and time zone stored                  | Implemented |
-| Request correlation       | `x-trace-id` on every response; `trace_id` in every log line                                                                          | Implemented |
-| Rejected token logging    | Rejected tokens are logged at `warn` with the reason (without the token)                                                              | Implemented |
-| Actor in audit logs       | Record the token `sub` together with the entry id when an entry is recorded or reversed                                               | Recommended |
-| Security alerts           | Alerts on spikes of 401, 403 and 429 per client, on brute force lockouts in Keycloak, and on DLQ messages caused by invalid contracts | Recommended |
-| Keycloak events           | Enable login and admin events and ship them to the log pipeline                                                                       | Recommended |
+| Capacidade                    | Detalhe                                                                                                                                              | Status       |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| Trilha de auditoria do ledger | Lançamentos imutáveis; correções apenas por estornos que referenciam o original; `recordedAt` e fuso horário gravados                                | Implementado |
+| Correlação de requisições     | `x-trace-id` em toda resposta; `trace_id` em toda linha de log                                                                                       | Implementado |
+| Log de tokens rejeitados      | Tokens rejeitados são registrados em `warn` com o motivo (sem o token)                                                                               | Implementado |
+| Autor nos logs de auditoria   | Registrar o `sub` do token junto com o id do lançamento quando um lançamento é registrado ou estornado                                               | Recomendado  |
+| Alertas de segurança          | Alertas para picos de 401, 403 e 429 por client, para bloqueios por força bruta no Keycloak e para mensagens na DLQ causadas por contratos inválidos | Recomendado  |
+| Eventos do Keycloak           | Habilitar eventos de login e de administração e enviá-los ao pipeline de logs                                                                        | Recomendado  |
 
-## 9. Production hardening checklist
+## 9. Checklist de endurecimento para produção
 
-| #   | Item                                                                           | Status         |
-| --- | ------------------------------------------------------------------------------ | -------------- |
-| 1   | JWT validation (signature, algorithm, issuer, audience, expiration, merchant)  | ✅ Implemented |
-| 2   | Scope-based authorization per route and roles bound to scopes                  | ✅ Implemented |
-| 3   | Merchant derived only from the token                                           | ✅ Implemented |
-| 4   | Rate limiting per merchant, body size limit, input validation                  | ✅ Implemented |
-| 5   | Security headers (HSTS, `nosniff`, frame options, CSP)                         | ✅ Implemented |
-| 6   | Idempotency on writes and deduplication on events                              | ✅ Implemented |
-| 7   | Non-root containers and separate databases per service                         | ✅ Implemented |
-| 8   | TLS at the edge and to every data store and the broker                         | ⬜ Recommended |
-| 9   | Encryption at rest with KMS                                                    | ⬜ Recommended |
-| 10  | Secrets Manager with rotation and IAM task roles                               | ⬜ Recommended |
-| 11  | WAF with managed rule sets and gateway quotas per client                       | ⬜ Recommended |
-| 12  | Dedicated broker users with least-privilege permissions                        | ⬜ Recommended |
-| 13  | Keycloak in production mode, password grant disabled, admin console not public | ⬜ Recommended |
-| 14  | Client Credentials clients per integration, with mTLS for partners             | ⬜ Recommended |
-| 15  | Dependency, code and image scanning in CI                                      | ⬜ Phase 10    |
-| 16  | Security alerts (401, 403 and 429 spikes, brute force, invalid contracts)      | ⬜ Recommended |
-| 17  | Private subnets and security groups per service                                | ⬜ Recommended |
-| 18  | Penetration test and periodic access review                                    | ⬜ Recommended |
+| #   | Item                                                                                            | Status          |
+| --- | ----------------------------------------------------------------------------------------------- | --------------- |
+| 1   | Validação de JWT (assinatura, algoritmo, emissor, audiência, expiração, comerciante)            | ✅ Implementado |
+| 2   | Autorização por escopo em cada rota e papéis vinculados a escopos                               | ✅ Implementado |
+| 3   | Comerciante obtido apenas do token                                                              | ✅ Implementado |
+| 4   | Rate limiting por comerciante, limite de tamanho do corpo, validação de entrada                 | ✅ Implementado |
+| 5   | Headers de segurança (HSTS, `nosniff`, frame options, CSP)                                      | ✅ Implementado |
+| 6   | Idempotência nas gravações e deduplicação nos eventos                                           | ✅ Implementado |
+| 7   | Containers não-root e bancos separados por serviço                                              | ✅ Implementado |
+| 8   | TLS na borda e para todos os armazenamentos de dados e o broker                                 | ⬜ Recomendado  |
+| 9   | Criptografia em repouso com KMS                                                                 | ⬜ Recomendado  |
+| 10  | Secrets Manager com rotação e IAM task roles                                                    | ⬜ Recomendado  |
+| 11  | WAF com conjuntos de regras gerenciadas e cotas por client no gateway                           | ⬜ Recomendado  |
+| 12  | Usuários de broker dedicados com permissões de privilégio mínimo                                | ⬜ Recomendado  |
+| 13  | Keycloak em modo de produção, fluxo de senha desabilitado, console de administração não público | ⬜ Recomendado  |
+| 14  | Clients de Client Credentials por integração, com mTLS para parceiros                           | ⬜ Recomendado  |
+| 15  | Análise de dependências, código e imagens no CI                                                 | ⬜ Fase 10      |
+| 16  | Alertas de segurança (picos de 401, 403 e 429, força bruta, contratos inválidos)                | ⬜ Recomendado  |
+| 17  | Sub-redes privadas e security groups por serviço                                                | ⬜ Recomendado  |
+| 18  | Teste de intrusão e revisão periódica de acessos                                                | ⬜ Recomendado  |

@@ -1,56 +1,56 @@
-# Target Architecture
+# Arquitetura Alvo
 
-This document describes the target solution for the merchant cash flow: how it is decomposed, how the parts communicate, where it runs and how it behaves under load and failure. Each section says what is **implemented locally** (the repository, running with Docker Compose) and what is the **target in production** (AWS).
+Este documento descreve a solução alvo para o fluxo de caixa do comerciante: como ela é decomposta, como as partes se comunicam, onde roda e como se comporta sob carga e diante de falhas. Cada seção indica o que está **implementado localmente** (o repositório, rodando com Docker Compose) e o que é o **alvo em produção** (AWS).
 
-Related documents: [business domains and capabilities](01-business-domains-and-capabilities.md), [requirements](02-requirements.md), [transition architecture](04-transition-architecture.md), [cost estimate](05-cost-estimate.md), [security](06-security.md), [operations](07-operations.md), [future evolutions](08-future-evolutions.md) and the [architecture decision records](adr/).
+Documentos relacionados: [domínios de negócio e capacidades](01-business-domains-and-capabilities.md), [requisitos](02-requirements.md), [arquitetura de transição](04-transition-architecture.md), [estimativa de custos](05-cost-estimate.md), [segurança](06-security.md), [operação](07-operations.md), [evoluções futuras](08-future-evolutions.md) e os [registros de decisão de arquitetura](adr/).
 
-## 1. Architectural drivers
+## 1. Direcionadores arquiteturais
 
-| Driver                          | Requirement                                                            | How the architecture answers it                                                                                    |
-| ------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Availability of the ledger      | NFR-01: recording entries must not depend on the daily balance service | Separate services, databases and deployables; asynchronous integration through a transactional outbox and a broker |
-| Throughput of the daily balance | NFR-02: 50 req/s at peak with at most 5% of lost requests              | Materialized read model, Redis cache with stale fallback, circuit breakers, horizontally scalable stateless API    |
-| Consistency of money            | Entries are never lost, duplicated or partially written                | ACID transactions, database constraints, idempotency keys, idempotent consumer, additive upserts                   |
-| Durability                      | A recorded entry survives crashes of any component                     | Entry and event committed together; persistent messages with publisher confirms; quorum queues                     |
-| Security                        | Each merchant sees and changes only its own data                       | OIDC with Keycloak, JWT validated locally, scopes per route, merchant taken from the token                         |
-| Observability                   | Failures are detected before merchants notice                          | OpenTelemetry traces, metrics and logs; end-to-end traces through the outbox; dashboards and alert rules           |
+| Direcionador              | Requisito                                                                 | Como a arquitetura responde                                                                                                             |
+| ------------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Disponibilidade do ledger | RNF-01: registrar lançamentos não pode depender do serviço de consolidado | Serviços, bancos e unidades de deploy separados; integração assíncrona por transactional outbox e broker                                |
+| Vazão do consolidado      | RNF-02: 50 req/s no pico com no máximo 5% de requisições perdidas         | Modelo de leitura materializado, cache Redis com fallback para dado obsoleto, circuit breakers, API stateless escalável horizontalmente |
+| Consistência do dinheiro  | Lançamentos nunca são perdidos, duplicados ou gravados parcialmente       | Transações ACID, constraints no banco, chaves de idempotência, consumidor idempotente, upserts aditivos                                 |
+| Durabilidade              | Um lançamento registrado sobrevive à queda de qualquer componente         | Lançamento e evento gravados juntos; mensagens persistentes com publisher confirms; quorum queues                                       |
+| Segurança                 | Cada comerciante vê e altera apenas os próprios dados                     | OIDC com Keycloak, JWT validado localmente, escopos por rota, comerciante extraído do token                                             |
+| Observabilidade           | Falhas são detectadas antes que os comerciantes percebam                  | Traces, métricas e logs com OpenTelemetry; traces ponta a ponta atravessando o outbox; dashboards e regras de alerta                    |
 
-The requirement identifiers are defined in [02-requirements.md](02-requirements.md).
+Os identificadores dos requisitos estão definidos em [02-requirements.md](02-requirements.md).
 
-## 2. System context (C4 level 1)
+## 2. Contexto do sistema (C4 nível 1)
 
 ```mermaid
 flowchart TB
-  operator(["Merchant operator<br/>records cash entries"])
-  analyst(["Merchant analyst<br/>reads balances and reports"])
-  system["Cash Flow system<br/>records entries and consolidates the daily balance"]
-  idp["Identity provider<br/>Keycloak (OIDC)"]
-  pos["POS / ERP<br/>(future source of entries)"]
-  acquirer["Payment acquirers<br/>(future settlement source)"]
-  bi["BI / accounting tools<br/>(future consumers of events)"]
+  operator(["Operador do comerciante<br/>registra lançamentos de caixa"])
+  analyst(["Analista do comerciante<br/>consulta saldos e relatórios"])
+  system["Sistema Cash Flow<br/>registra lançamentos e consolida o saldo diário"]
+  idp["Provedor de identidade<br/>Keycloak (OIDC)"]
+  pos["PDV / ERP<br/>(fonte futura de lançamentos)"]
+  acquirer["Adquirentes de pagamento<br/>(fonte futura de liquidações)"]
+  bi["BI / ferramentas contábeis<br/>(consumidores futuros de eventos)"]
 
   operator -->|"HTTPS + JWT"| system
   analyst -->|"HTTPS + JWT"| system
   operator -->|login| idp
   analyst -->|login| idp
-  system -->|"public keys (JWKS)"| idp
-  pos -.->|"entries via API"| system
-  acquirer -.->|"settlements via API"| system
+  system -->|"chaves públicas (JWKS)"| idp
+  pos -.->|"lançamentos via API"| system
+  acquirer -.->|"liquidações via API"| system
   system -.->|"CloudEvents"| bi
 ```
 
-Dashed arrows are not implemented. They show that the published API and the event contract are the integration points for future sources and consumers, with no change to the core.
+As setas tracejadas não estão implementadas. Elas mostram que a API publicada e o contrato de eventos são os pontos de integração para fontes e consumidores futuros, sem alteração no núcleo.
 
-## 3. Containers (C4 level 2)
+## 3. Containers (C4 nível 2)
 
 ```mermaid
 flowchart LR
-  user(["Merchant"])
+  user(["Comerciante"])
   kc["Keycloak<br/>realm cash-flow"]
 
-  subgraph ledgerCtx["Ledger bounded context"]
-    ledger["ledger<br/>REST API<br/>Node.js + Fastify"]
-    relay["ledger-outbox-relay<br/>polling worker"]
+  subgraph ledgerCtx["Bounded context Ledger"]
+    ledger["ledger<br/>API REST<br/>Node.js + Fastify"]
+    relay["ledger-outbox-relay<br/>worker de polling"]
     ldb[("PostgreSQL ledger<br/>entries, points_of_sale,<br/>idempotency_keys, outbox")]
   end
 
@@ -61,14 +61,14 @@ flowchart LR
     dlq["...ledger-events.dlq"]
   end
 
-  subgraph balanceCtx["Daily balance bounded context"]
-    consumer["daily-balance-consumer<br/>event consumer"]
-    api["daily-balance<br/>REST API<br/>Node.js + Fastify"]
+  subgraph balanceCtx["Bounded context Daily Balance"]
+    consumer["daily-balance-consumer<br/>consumidor de eventos"]
+    api["daily-balance<br/>API REST<br/>Node.js + Fastify"]
     bdb[("PostgreSQL daily_balance<br/>daily_balances,<br/>applied_movements")]
-    redis[("Redis<br/>report cache")]
+    redis[("Redis<br/>cache de relatórios")]
   end
 
-  subgraph obs["Observability"]
+  subgraph obs["Observabilidade"]
     otel["OpenTelemetry Collector"]
     stack["Prometheus, Tempo, Loki, Grafana"]
   end
@@ -76,15 +76,15 @@ flowchart LR
   user -->|"POST/GET /v1/entries"| ledger
   user -->|"GET /v1/daily-balances"| api
   user -->|login| kc
-  ledger -->|"entry + event in one transaction"| ldb
+  ledger -->|"lançamento + evento na mesma transação"| ldb
   relay -->|"SELECT ... FOR UPDATE SKIP LOCKED"| ldb
   relay -->|"publish, confirms, mandatory"| ex
   ex -->|"cashflow.ledger.entry.*.v1"| q
   q --> consumer
-  consumer -->|"transient failure"| rq
-  rq -->|"after delay"| q
-  consumer -->|"invalid or exhausted"| dlq
-  consumer -->|"journal + additive upsert"| bdb
+  consumer -->|"falha transitória"| rq
+  rq -->|"após o atraso"| q
+  consumer -->|"inválida ou tentativas esgotadas"| dlq
+  consumer -->|"diário + upsert aditivo"| bdb
   api --> redis
   api --> bdb
   ledger -.->|JWKS| kc
@@ -93,45 +93,45 @@ flowchart LR
   otel --> stack
 ```
 
-| Container                | Responsibility                                              | Scales by                        | Implemented locally |
-| ------------------------ | ----------------------------------------------------------- | -------------------------------- | ------------------- |
-| `ledger`                 | Record, reverse and query entries; configure points of sale | Replicas behind a load balancer  | Yes                 |
-| `ledger-outbox-relay`    | Publish pending outbox events to RabbitMQ                   | Replicas (`SKIP LOCKED`)         | Yes                 |
-| `daily-balance-consumer` | Consolidate ledger events into daily balances               | Competing consumers on the queue | Yes                 |
-| `daily-balance`          | Serve day and period reports                                | Replicas behind a load balancer  | Yes                 |
-| PostgreSQL ×2            | One database per bounded context                            | Vertical, read replicas          | Yes                 |
-| RabbitMQ                 | Topic exchange, quorum queues, retry queue and DLQ          | Cluster of 3 nodes               | Single node         |
-| Redis                    | Report cache with stale fallback                            | Replica, cluster mode if needed  | Single node         |
-| Keycloak                 | OIDC provider, users, roles and scopes                      | Replicas with shared database    | Dev mode            |
-| Observability stack      | Collector, Prometheus, Tempo, Loki, Grafana                 | Managed services in production   | Yes                 |
+| Container                | Responsabilidade                                                        | Escala por                          | Implementado localmente |
+| ------------------------ | ----------------------------------------------------------------------- | ----------------------------------- | ----------------------- |
+| `ledger`                 | Registrar, estornar e consultar lançamentos; configurar pontos de venda | Réplicas atrás de um load balancer  | Sim                     |
+| `ledger-outbox-relay`    | Publicar no RabbitMQ os eventos pendentes do outbox                     | Réplicas (`SKIP LOCKED`)            | Sim                     |
+| `daily-balance-consumer` | Consolidar os eventos do ledger em saldos diários                       | Consumidores concorrentes na fila   | Sim                     |
+| `daily-balance`          | Servir relatórios do dia e do período                                   | Réplicas atrás de um load balancer  | Sim                     |
+| PostgreSQL ×2            | Um banco por bounded context                                            | Vertical, réplicas de leitura       | Sim                     |
+| RabbitMQ                 | Exchange topic, quorum queues, fila de retry e DLQ                      | Cluster de 3 nós                    | Nó único                |
+| Redis                    | Cache de relatórios com fallback para dado obsoleto                     | Réplica, modo cluster se necessário | Nó único                |
+| Keycloak                 | Provedor OIDC, usuários, papéis e escopos                               | Réplicas com banco compartilhado    | Modo dev                |
+| Stack de observabilidade | Collector, Prometheus, Tempo, Loki, Grafana                             | Serviços gerenciados em produção    | Sim                     |
 
-Each process is a separate deployable built from the same image with a different command (`node dist/main.js`, `dist/relay.js`, `dist/consumer.js`). See [ADR 0002](adr/0002-event-driven-microservices.md) and [ADR 0004](adr/0004-postgresql-database-per-service.md).
+Cada processo é uma unidade de deploy separada, construída a partir da mesma imagem com um comando diferente (`node dist/main.js`, `dist/relay.js`, `dist/consumer.js`). Veja o [ADR 0002](adr/0002-event-driven-microservices.md) e o [ADR 0004](adr/0004-postgresql-database-per-service.md).
 
-## 4. Components (C4 level 3): daily balance service
+## 4. Componentes (C4 nível 3): serviço de consolidado
 
-Both services follow the same hexagonal layout ([ADR 0003](adr/0003-hexagonal-architecture.md)). Dependencies always point inwards: the domain knows nothing about Fastify, PostgreSQL, RabbitMQ, Redis or OpenTelemetry.
+Os dois serviços seguem a mesma organização hexagonal ([ADR 0003](adr/0003-hexagonal-architecture.md)). As dependências sempre apontam para dentro: o domínio não conhece Fastify, PostgreSQL, RabbitMQ, Redis nem OpenTelemetry.
 
 ```mermaid
 flowchart LR
-  subgraph inbound["Inbound adapters"]
+  subgraph inbound["Adapters de entrada"]
     routes["dailyBalanceRoutes<br/>(Fastify, TypeBox)"]
-    auth["authentication plugin<br/>JoseTokenVerifier"]
+    auth["plugin authentication<br/>JoseTokenVerifier"]
     consumerA["RabbitMqLedgerEventConsumer"]
     handler["LedgerMessageHandler<br/>+ ledger-event-translator"]
     cli["rebuild-day / redrive-dead-letters"]
   end
 
-  subgraph app["Application"]
-    portsIn["Inbound ports<br/>GetBalanceReport<br/>ConsolidateMovement<br/>RebuildDailyBalance"]
-    uc["Use cases<br/>GetBalanceReportService<br/>CachedBalanceReport<br/>ConsolidateMovementService<br/>RebuildDailyBalanceService"]
-    portsOut["Outbound ports<br/>DailyBalanceReadModel<br/>DailyBalanceRepository<br/>MovementJournal<br/>BalanceReportCache<br/>TransactionRunner, Clock"]
+  subgraph app["Aplicação"]
+    portsIn["Ports de entrada<br/>GetBalanceReport<br/>ConsolidateMovement<br/>RebuildDailyBalance"]
+    uc["Casos de uso<br/>GetBalanceReportService<br/>CachedBalanceReport<br/>ConsolidateMovementService<br/>RebuildDailyBalanceService"]
+    portsOut["Ports de saída<br/>DailyBalanceReadModel<br/>DailyBalanceRepository<br/>MovementJournal<br/>BalanceReportCache<br/>TransactionRunner, Clock"]
   end
 
-  subgraph domain["Domain"]
+  subgraph domain["Domínio"]
     dom["DailyBalance, Movement,<br/>BalanceReport, ReportPeriod,<br/>BusinessDate, Money, EntryType"]
   end
 
-  subgraph outbound["Outbound adapters"]
+  subgraph outbound["Adapters de saída"]
     pg["PostgresDailyBalanceReadModel<br/>PostgresDailyBalanceRepository<br/>PostgresMovementJournal<br/>PostgresDatabase"]
     breaker["CircuitBreakingReadModel<br/>CircuitBreaker"]
     cache["RedisBalanceReportCache"]
@@ -144,33 +144,33 @@ flowchart LR
   portsIn --> uc
   uc --> dom
   uc --> portsOut
-  portsOut -.implemented by.-> pg
-  portsOut -.implemented by.-> breaker
-  portsOut -.implemented by.-> cache
+  portsOut -.implementado por.-> pg
+  portsOut -.implementado por.-> breaker
+  portsOut -.implementado por.-> cache
   breaker --> pg
 ```
 
-The ledger has the same shape: `entryRoutes` and `pointOfSaleRoutes` call `RecordEntryService`, `ReverseEntryService`, `GetEntryService`, `ListEntriesService` and `ConfigurePointOfSaleService`; the `Entry` aggregate raises domain events; `PostgresEntryRepository` saves the entry and calls `OutboxWriter` in the same transaction; `PublishPendingEventsService` (driven by `PollingWorker`) reads from `PostgresOutboxStore` and publishes through `RabbitMqEventPublisher`.
+O ledger tem a mesma forma: `entryRoutes` e `pointOfSaleRoutes` chamam `RecordEntryService`, `ReverseEntryService`, `GetEntryService`, `ListEntriesService` e `ConfigurePointOfSaleService`; o agregado `Entry` emite eventos de domínio; `PostgresEntryRepository` grava o lançamento e chama o `OutboxWriter` na mesma transação; `PublishPendingEventsService` (acionado pelo `PollingWorker`) lê do `PostgresOutboxStore` e publica pelo `RabbitMqEventPublisher`.
 
-## 5. Key data flows
+## 5. Principais fluxos de dados
 
-### 5.1 Record an entry
+### 5.1 Registrar um lançamento
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant M as Merchant
-  participant L as ledger API
+  participant M as Comerciante
+  participant L as API ledger
   participant DB as PostgreSQL ledger
   M->>L: POST /v1/entries (Bearer JWT, Idempotency-Key)
-  L->>L: validate JWT, scope ledger:write, merchant_id from token
-  L->>L: validate body (TypeBox) and value objects
+  L->>L: valida o JWT, escopo ledger:write, merchant_id do token
+  L->>L: valida o corpo (TypeBox) e os value objects
   L->>DB: BEGIN
   L->>DB: INSERT idempotency_keys ON CONFLICT DO NOTHING
-  alt key already completed
-    DB-->>L: stored response
+  alt chave já concluída
+    DB-->>L: resposta armazenada
     L-->>M: 201 (idempotent-replayed: true)
-  else first request
+  else primeira requisição
     L->>DB: INSERT entries
     L->>DB: INSERT outbox (CloudEvent + traceparent)
     L->>DB: UPDATE idempotency_keys SET response
@@ -179,31 +179,31 @@ sequenceDiagram
   end
 ```
 
-RabbitMQ and the daily balance are not in this path. If either is down, the entry is still recorded.
+O RabbitMQ e o consolidado não estão nesse caminho. Se qualquer um deles estiver fora do ar, o lançamento continua sendo registrado.
 
-### 5.2 Publish events
+### 5.2 Publicar eventos
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant W as ledger-outbox-relay
   participant DB as PostgreSQL ledger
-  participant X as RabbitMQ exchange
-  loop every 500 ms, or immediately while there is a backlog
-    W->>DB: BEGIN; SELECT pending FOR UPDATE SKIP LOCKED LIMIT 100
-    W->>X: publish each event (persistent, mandatory) in the stored trace context
-    X-->>W: publisher confirm, or basic.return if unroutable
-    alt confirmed
+  participant X as exchange RabbitMQ
+  loop a cada 500 ms, ou imediatamente enquanto houver backlog
+    W->>DB: BEGIN; SELECT pendentes FOR UPDATE SKIP LOCKED LIMIT 100
+    W->>X: publica cada evento (persistent, mandatory) no contexto de trace armazenado
+    X-->>W: publisher confirm, ou basic.return se não houver rota
+    alt confirmado
       W->>DB: UPDATE outbox SET published_at
-    else rejected by the broker
-      W->>DB: attempts + 1, next_attempt_at with exponential backoff
+    else rejeitado pelo broker
+      W->>DB: attempts + 1, next_attempt_at com backoff exponencial
     end
     W->>DB: COMMIT
   end
-  Note over W,DB: infrastructure errors roll back the whole batch and the worker backs off up to 30 s
+  Note over W,DB: erros de infraestrutura desfazem o lote inteiro e o worker espera até 30 s
 ```
 
-### 5.3 Consolidate
+### 5.3 Consolidar
 
 ```mermaid
 sequenceDiagram
@@ -211,87 +211,87 @@ sequenceDiagram
   participant Q as daily-balance.ledger-events
   participant C as daily-balance-consumer
   participant DB as PostgreSQL daily_balance
-  participant R as retry queue
+  participant R as fila de retry
   participant D as DLQ
   Q->>C: CloudEvent (at-least-once)
-  C->>C: validate against LedgerEventV1 contract
-  alt invalid message or domain rejection
-    C->>D: publish with x-dead-letter-reason, then ack
-  else valid
+  C->>C: valida contra o contrato LedgerEventV1
+  alt mensagem inválida ou rejeitada pelo domínio
+    C->>D: publica com x-dead-letter-reason, depois ack
+  else válida
     C->>DB: BEGIN
     C->>DB: INSERT applied_movements ON CONFLICT DO NOTHING
-    alt duplicate (same event id or entry id)
+    alt duplicata (mesmo id de evento ou de lançamento)
       C->>DB: COMMIT
-    else first delivery
+    else primeira entrega
       C->>DB: INSERT daily_balances ... ON CONFLICT DO UPDATE SET total = total + delta
       C->>DB: COMMIT
     end
     C->>Q: ack
   end
-  opt transient failure (e.g. database down)
-    C->>R: publish with x-attempt + 1 and TTL, then ack
-    R-->>Q: dead-lettered back after the delay
-    Note over C,D: after CONSUMER_MAX_ATTEMPTS the message goes to the DLQ
+  opt falha transitória (ex.: banco fora do ar)
+    C->>R: publica com x-attempt + 1 e TTL, depois ack
+    R-->>Q: volta por dead-letter após o atraso
+    Note over C,D: após CONSUMER_MAX_ATTEMPTS a mensagem vai para a DLQ
   end
 ```
 
-### 5.4 Query the daily balance
+### 5.4 Consultar o saldo diário
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant M as Merchant
-  participant A as daily-balance API
+  participant M as Comerciante
+  participant A as API daily-balance
   participant R as Redis
   participant DB as PostgreSQL daily_balance
   M->>A: GET /v1/daily-balances/2026-10-09 (Bearer JWT)
-  A->>R: GET report key (circuit breaker, 100 ms timeout)
-  alt fresh (less than 5 s old)
+  A->>R: GET da chave do relatório (circuit breaker, timeout de 100 ms)
+  alt atual (menos de 5 s)
     A-->>M: 200, x-cache: HIT
-  else missing or expired
-    A->>DB: opening balance + day rows (circuit breaker, 2 s timeout)
-    alt database answers
-      A->>R: SET report (stale TTL 24 h)
+  else ausente ou expirado
+    A->>DB: saldo de abertura + linhas do dia (circuit breaker, timeout de 2 s)
+    alt banco responde
+      A->>R: SET do relatório (TTL de reserva de 24 h)
       A-->>M: 200, x-cache: MISS
-    else database unavailable, stale copy exists
+    else banco indisponível, existe cópia obsoleta
       A-->>M: 200, x-cache: STALE
-    else nothing cached
+    else nada em cache
       A-->>M: 503 Problem Details, Retry-After
     end
   end
 ```
 
-Concurrent identical misses share one database read (single-flight).
+Misses idênticos e simultâneos compartilham uma única leitura no banco (single-flight).
 
-### 5.5 Reverse an entry
+### 5.5 Estornar um lançamento
 
-A reversal is a new entry of the opposite type, with the same amount, business date, point of sale and time zone, referencing the original. A unique partial index (`entries_reversal_of_uidx`) guarantees a single reversal even under concurrent requests: one gets `201`, the other `409 ENTRY_ALREADY_REVERSED`. The reversal is published as `cashflow.ledger.entry.reversed.v1` and the consumer adds it to the debit (or credit) total of the original day, so the day balance is corrected without rewriting history.
+Um estorno é um novo lançamento do tipo oposto, com o mesmo valor, data de competência, ponto de venda e fuso, referenciando o original. Um índice parcial único (`entries_reversal_of_uidx`) garante um único estorno mesmo com requisições simultâneas: uma recebe `201` e a outra `409 ENTRY_ALREADY_REVERSED`. O estorno é publicado como `cashflow.ledger.entry.reversed.v1` e o consumidor o soma ao total de débitos (ou créditos) do dia original, de modo que o saldo do dia é corrigido sem reescrever o histórico.
 
-## 6. Data model
+## 6. Modelo de dados
 
-### Ledger database
+### Banco do ledger
 
-| Table              | Purpose                                 | Key constraints                                                                                                                                                                                                           |
-| ------------------ | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `entries`          | Immutable cash entries                  | `amount_in_cents > 0`, `type IN ('CREDIT','DEBIT')`, `currency = 'BRL'`, FK `(merchant_id, point_of_sale_id)` to points of sale, unique partial index on `reversal_of`, index `(merchant_id, business_date, recorded_at)` |
-| `points_of_sale`   | Local IANA time zone per point of sale  | PK `(merchant_id, id)`                                                                                                                                                                                                    |
-| `idempotency_keys` | Request fingerprint and stored response | PK `(merchant_id, key)`                                                                                                                                                                                                   |
-| `outbox`           | Events waiting to be published          | `published_at`, `attempts`, `last_error`, `next_attempt_at`; partial index `outbox_pending_idx` on pending rows                                                                                                           |
+| Tabela             | Finalidade                                            | Principais constraints                                                                                                                                                                                                        |
+| ------------------ | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `entries`          | Lançamentos de caixa imutáveis                        | `amount_in_cents > 0`, `type IN ('CREDIT','DEBIT')`, `currency = 'BRL'`, FK `(merchant_id, point_of_sale_id)` para pontos de venda, índice parcial único em `reversal_of`, índice `(merchant_id, business_date, recorded_at)` |
+| `points_of_sale`   | Fuso IANA local de cada ponto de venda                | PK `(merchant_id, id)`                                                                                                                                                                                                        |
+| `idempotency_keys` | Impressão digital da requisição e resposta armazenada | PK `(merchant_id, key)`                                                                                                                                                                                                       |
+| `outbox`           | Eventos aguardando publicação                         | `published_at`, `attempts`, `last_error`, `next_attempt_at`; índice parcial `outbox_pending_idx` nas linhas pendentes                                                                                                         |
 
-### Daily balance database
+### Banco do consolidado
 
-| Table               | Purpose                                            | Key constraints                                                                                                         |
-| ------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `daily_balances`    | Materialized balance per merchant and business day | PK `(merchant_id, business_date)`, non-negative totals, `balance_cents` generated as credits minus debits               |
-| `applied_movements` | Journal of consolidated events                     | PK `event_id`, unique `entry_id`, index `(merchant_id, business_date)`; used for deduplication and for rebuilding a day |
+| Tabela              | Finalidade                                               | Principais constraints                                                                                                    |
+| ------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `daily_balances`    | Saldo materializado por comerciante e dia de competência | PK `(merchant_id, business_date)`, totais não negativos, `balance_cents` gerado como créditos menos débitos               |
+| `applied_movements` | Diário dos eventos consolidados                          | PK `event_id`, `entry_id` único, índice `(merchant_id, business_date)`; usado para deduplicação e para reconstruir um dia |
 
-Migrations are TypeScript modules applied at startup under `pg_advisory_lock`, so several replicas starting together are safe.
+As migrations são módulos TypeScript aplicados na inicialização sob `pg_advisory_lock`, então várias réplicas subindo ao mesmo tempo não causam problema.
 
-## 7. Integration contracts
+## 7. Contratos de integração
 
 ### REST
 
-| Service       | Method and route                         | Scope          |
+| Serviço       | Método e rota                            | Escopo         |
 | ------------- | ---------------------------------------- | -------------- |
 | ledger        | `PUT /v1/points-of-sale/{pointOfSaleId}` | `ledger:write` |
 | ledger        | `POST /v1/entries`                       | `ledger:write` |
@@ -301,38 +301,38 @@ Migrations are TypeScript modules applied at startup under `pg_advisory_lock`, s
 | daily-balance | `GET /v1/daily-balances/{businessDate}`  | `balance:read` |
 | daily-balance | `GET /v1/daily-balances?from=&to=`       | `balance:read` |
 
-Both APIs publish OpenAPI documents at `/docs`, answer errors as RFC 9457 Problem Details and return `x-trace-id` on every response.
+As duas APIs publicam documentos OpenAPI em `/docs`, respondem erros no formato Problem Details (RFC 9457) e retornam `x-trace-id` em toda resposta.
 
-### Events
+### Eventos
 
-| Item                   | Value                                                                                 |
-| ---------------------- | ------------------------------------------------------------------------------------- |
-| Envelope               | CloudEvents 1.0, `application/cloudevents+json`                                       |
-| Exchange               | `cash-flow.ledger.events` (topic, durable)                                            |
-| Types and routing keys | `cashflow.ledger.entry.recorded.v1`, `cashflow.ledger.entry.reversed.v1`              |
-| Binding for consumers  | `cashflow.ledger.entry.*.v1`                                                          |
-| Tracing                | `traceparent` and `tracestate` attributes (CloudEvents Distributed Tracing extension) |
-| Contract               | TypeBox schemas and validator in the shared `@cash-flow/contracts` package            |
-| Delivery               | At-least-once; consumers deduplicate by event `id` (also the AMQP `messageId`)        |
+| Item                      | Valor                                                                                     |
+| ------------------------- | ----------------------------------------------------------------------------------------- |
+| Envelope                  | CloudEvents 1.0, `application/cloudevents+json`                                           |
+| Exchange                  | `cash-flow.ledger.events` (topic, durável)                                                |
+| Tipos e routing keys      | `cashflow.ledger.entry.recorded.v1`, `cashflow.ledger.entry.reversed.v1`                  |
+| Binding para consumidores | `cashflow.ledger.entry.*.v1`                                                              |
+| Tracing                   | Atributos `traceparent` e `tracestate` (extensão Distributed Tracing do CloudEvents)      |
+| Contrato                  | Schemas TypeBox e validador no pacote compartilhado `@cash-flow/contracts`                |
+| Entrega                   | At-least-once; os consumidores deduplicam pelo `id` do evento (também o `messageId` AMQP) |
 
-Versioning is in the type name. A breaking change publishes `.v2` alongside `.v1` during a transition; see [ADR 0007](adr/0007-cloudevents-shared-contracts.md).
+O versionamento está no nome do tipo. Uma mudança incompatível publica `.v2` junto com `.v1` durante uma transição; veja o [ADR 0007](adr/0007-cloudevents-shared-contracts.md).
 
-## 8. Production deployment (target)
+## 8. Implantação em produção (alvo)
 
-Primary region **sa-east-1 (São Paulo)**: the merchant and its data are in Brazil, latency to users is lowest and LGPD data residency is simpler to demonstrate.
+Região principal **sa-east-1 (São Paulo)**: o comerciante e seus dados estão no Brasil, a latência para os usuários é a menor possível e a residência de dados exigida pela LGPD fica mais simples de demonstrar.
 
 ```mermaid
 flowchart TB
-  users(["Merchants"])
+  users(["Comerciantes"])
   r53["Route 53"]
   waf["AWS WAF"]
-  apigw["API Gateway (HTTP API)<br/>or ALB<br/>TLS, rate limit per client"]
+  apigw["API Gateway (HTTP API)<br/>ou ALB<br/>TLS, rate limit por cliente"]
 
-  subgraph vpc["VPC sa-east-1, 2+ availability zones"]
-    subgraph pub["Public subnets"]
+  subgraph vpc["VPC sa-east-1, 2+ zonas de disponibilidade"]
+    subgraph pub["Sub-redes públicas"]
       alb["Application Load Balancer"]
     end
-    subgraph app["Private subnets: ECS Fargate"]
+    subgraph app["Sub-redes privadas: ECS Fargate"]
       s1["ledger<br/>2..N tasks"]
       s2["ledger-outbox-relay<br/>2 tasks"]
       s3["daily-balance<br/>2..N tasks"]
@@ -340,18 +340,18 @@ flowchart TB
       s5["keycloak<br/>2 tasks"]
       s6["ADOT collector"]
     end
-    subgraph data["Private subnets: data"]
+    subgraph data["Sub-redes privadas: dados"]
       rds1[("RDS PostgreSQL ledger<br/>Multi-AZ")]
       rds2[("RDS PostgreSQL daily_balance<br/>Multi-AZ")]
       rds3[("RDS PostgreSQL keycloak")]
-      mq["Amazon MQ for RabbitMQ<br/>3-node cluster"]
-      cache[("ElastiCache Valkey/Redis<br/>primary + replica")]
+      cache[("ElastiCache Valkey/Redis<br/>primário + réplica")]
     end
   end
 
+  mq["SNS (tópico de eventos do ledger)<br/>+ SQS (fila do consolidado e DLQ)"]
   sm["Secrets Manager + KMS"]
   amp["Amazon Managed Prometheus<br/>+ Managed Grafana"]
-  xray["X-Ray or Tempo/Loki on S3"]
+  xray["X-Ray ou Tempo/Loki no S3"]
 
   users --> r53 --> waf --> apigw --> alb
   alb --> s1 & s3 & s5
@@ -369,98 +369,98 @@ flowchart TB
   app -.-> sm
 ```
 
-| Concern         | Target choice                                                                                                                         | Notes                                                                                                                                      |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Compute         | ECS Fargate, one ECS service per process, tasks spread across at least two AZs                                                        | Same image as local, different command; no servers to patch; autoscaling on CPU and request count (APIs) or queue depth (consumer)         |
-| Edge            | Route 53, AWS WAF, API Gateway HTTP API or ALB                                                                                        | TLS termination, IP and client rate limiting as a first layer; the application limit per merchant remains as a second layer                |
-| Relational data | RDS PostgreSQL 17 Multi-AZ, one instance per bounded context                                                                          | Synchronous standby, automated backups and point-in-time recovery; read replica for the daily balance if reads ever require it             |
-| Messaging       | **SNS + SQS** (one topic for ledger events, one queue per consumer, DLQ through a redrive policy)                                     | Serverless and Multi-AZ by default; requires new publisher and consumer adapters; Amazon MQ is the zero-code-change alternative; see below |
-| Cache           | ElastiCache for Valkey (Redis compatible), primary and replica in different AZs                                                       | The API already tolerates the cache being unavailable                                                                                      |
-| Identity        | Keycloak on Fargate with its own RDS                                                                                                  | Amazon Cognito is the managed alternative; tokens are validated through JWKS, so the services do not change                                |
-| Secrets         | Secrets Manager with rotation, KMS keys for RDS, MQ, ElastiCache and S3 encryption at rest                                            | No credentials in task definitions or images                                                                                               |
-| Observability   | ADOT collector sidecar or service; Amazon Managed Prometheus and Managed Grafana; X-Ray or self-hosted Tempo and Loki with S3 storage | The services export OTLP only, so the backend is a collector configuration choice                                                          |
+| Aspecto           | Escolha alvo                                                                                                                                       | Observações                                                                                                                                                                     |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Computação        | ECS Fargate, um serviço ECS por processo, tasks distribuídas em pelo menos duas AZs                                                                | Mesma imagem do ambiente local, com outro comando; sem servidores para aplicar patches; autoscaling por CPU e número de requisições (APIs) ou profundidade da fila (consumidor) |
+| Borda             | Route 53, AWS WAF, API Gateway HTTP API ou ALB                                                                                                     | Terminação TLS e rate limiting por IP e por cliente como primeira camada; o limite da aplicação por comerciante continua como segunda camada                                    |
+| Dados relacionais | RDS PostgreSQL 17 Multi-AZ, uma instância por bounded context                                                                                      | Standby síncrono, backups automáticos e point-in-time recovery; réplica de leitura para o consolidado se as leituras exigirem                                                   |
+| Mensageria        | **SNS + SQS** (um tópico para os eventos do ledger, uma fila por consumidor, DLQ por redrive policy)                                               | Serverless e Multi-AZ por padrão; exige novos adapters de publicação e de consumo; o Amazon MQ é a alternativa sem mudança de código; veja abaixo                               |
+| Cache             | ElastiCache for Valkey (compatível com Redis), primário e réplica em AZs diferentes                                                                | A API já tolera o cache indisponível                                                                                                                                            |
+| Identidade        | Keycloak no Fargate com seu próprio RDS                                                                                                            | O Amazon Cognito é a alternativa gerenciada; os tokens são validados pelo JWKS, então os serviços não mudam                                                                     |
+| Segredos          | Secrets Manager com rotação, chaves KMS para criptografia em repouso de RDS, MQ, ElastiCache e S3                                                  | Nenhuma credencial em task definitions ou imagens                                                                                                                               |
+| Observabilidade   | ADOT collector como sidecar ou serviço; Amazon Managed Prometheus e Managed Grafana; X-Ray ou Tempo e Loki auto-hospedados com armazenamento em S3 | Os serviços exportam apenas OTLP, então o backend é uma escolha de configuração do collector                                                                                    |
 
-### Messaging: Amazon MQ for RabbitMQ or SNS + SQS
+### Mensageria: Amazon MQ para RabbitMQ ou SNS + SQS
 
-| Criterion           | Amazon MQ for RabbitMQ                  | SNS + SQS                                                           |
-| ------------------- | --------------------------------------- | ------------------------------------------------------------------- |
-| Code change         | None                                    | New publisher and consumer adapters (hexagonal ports stay the same) |
-| Retry and DLQ       | Current retry queue with TTL and DLQ    | Native visibility timeout, `maxReceiveCount` and DLQ redrive        |
-| Operations          | Managed broker, still sized by instance | Fully serverless, no capacity planning                              |
-| Cost at this volume | Fixed cost per broker instance          | Pay per request, very low at tens of events per second              |
-| Local parity        | Same as Docker Compose                  | Needs LocalStack or a cloud account for integration tests           |
+| Critério             | Amazon MQ for RabbitMQ                              | SNS + SQS                                                                        |
+| -------------------- | --------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Mudança de código    | Nenhuma                                             | Novos adapters de publicação e de consumo (os ports hexagonais continuam iguais) |
+| Retry e DLQ          | Fila de retry com TTL e DLQ atuais                  | Visibility timeout, `maxReceiveCount` e redrive para DLQ nativos                 |
+| Operação             | Broker gerenciado, ainda dimensionado por instância | Totalmente serverless, sem planejamento de capacidade                            |
+| Custo neste volume   | Custo fixo por instância de broker                  | Pagamento por requisição, muito baixo com dezenas de eventos por segundo         |
+| Paridade com o local | Igual ao Docker Compose                             | Precisa de LocalStack ou de uma conta na nuvem para testes de integração         |
 
-**Recommendation:** use **SNS + SQS** in production. A Multi-AZ Amazon MQ cluster would cost about as much as the rest of the platform (about $625/month more in us-east-1, see [05-cost-estimate.md](05-cost-estimate.md)) for a few million messages a month, and SQS removes the broker from the operational burden. The change is confined to the adapters, which is exactly what the hexagonal architecture is for: an `SnsEventPublisher` implementing the `EventPublisher` port and an SQS consumer calling the same `LedgerMessageHandler`, with the retry queue and DLQ replaced by visibility timeout, `maxReceiveCount` and a redrive policy. Domain, use cases, outbox and event contract stay untouched ([ADR 0006](adr/0006-rabbitmq-message-broker.md)).
+**Recomendação:** usar **SNS + SQS** em produção. Um cluster Multi-AZ do Amazon MQ custaria quase o mesmo que todo o resto da plataforma (cerca de $625/mês a mais em us-east-1, veja [05-cost-estimate.md](05-cost-estimate.md)) para alguns milhões de mensagens por mês, e o SQS tira o broker da carga operacional. A mudança fica restrita aos adapters, que é exatamente para isso que serve a arquitetura hexagonal: um `SnsEventPublisher` implementando o port `EventPublisher` e um consumidor SQS chamando o mesmo `LedgerMessageHandler`, com a fila de retry e a DLQ substituídas por visibility timeout, `maxReceiveCount` e uma redrive policy. Domínio, casos de uso, outbox e contrato de eventos continuam intactos ([ADR 0006](adr/0006-rabbitmq-message-broker.md)).
 
-If time to market matters more than cost for the first release, **Amazon MQ for RabbitMQ** runs the current code with zero changes and the exact behavior validated by the tests; the migration to SNS + SQS can follow as a cost optimization.
+Se o prazo de entrada em produção importar mais do que o custo na primeira versão, o **Amazon MQ for RabbitMQ** roda o código atual sem nenhuma mudança e com o comportamento exato validado pelos testes; a migração para SNS + SQS pode vir depois, como otimização de custo.
 
-## 9. Scalability
+## 9. Escalabilidade
 
-| Process                    | Strategy                                                                                                           |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| ledger, daily-balance      | Stateless; add tasks behind the load balancer. State is in PostgreSQL and Redis                                    |
-| ledger-outbox-relay        | Several replicas share the outbox through `FOR UPDATE SKIP LOCKED`; tested with three concurrent relays            |
-| daily-balance-consumer     | Competing consumers on the same quorum queue; `prefetch` controls parallelism per replica                          |
-| Daily balance reads        | Primary-key lookups on a materialized table, cache in front, single-flight for identical misses                    |
-| Growth beyond one database | Partition `entries` and `applied_movements` by business date; shard by merchant if a single instance is not enough |
+| Processo                     | Estratégia                                                                                                                              |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| ledger, daily-balance        | Stateless; basta adicionar tasks atrás do load balancer. O estado fica no PostgreSQL e no Redis                                         |
+| ledger-outbox-relay          | Várias réplicas dividem o outbox por meio de `FOR UPDATE SKIP LOCKED`; testado com três relays simultâneos                              |
+| daily-balance-consumer       | Consumidores concorrentes na mesma quorum queue; o `prefetch` controla o paralelismo por réplica                                        |
+| Leituras do consolidado      | Buscas por chave primária em uma tabela materializada, cache na frente e single-flight para misses idênticos                            |
+| Crescimento além de um banco | Particionar `entries` e `applied_movements` por data de competência; fazer sharding por comerciante se uma instância não for suficiente |
 
-Measured on a single replica of each process, on a laptop running the whole stack ([README](../README.md#testes-de-carga-e-resiliência)):
+Medido com uma única réplica de cada processo, em um notebook rodando a stack inteira ([README](../README.md#testes-de-carga-e-resiliência)):
 
-| Scenario                     | Result                                  |
-| ---------------------------- | --------------------------------------- |
-| 50 req/s for 2 minutes       | 6,001 requests, 0% errors, p95 6.5 ms   |
-| 400 req/s for 1 minute       | 23,955 requests, 0% errors, p95 20.9 ms |
-| Consolidation lag (p50, p95) | 0.26 s, 0.5 s                           |
+| Cenário                           | Resultado                                       |
+| --------------------------------- | ----------------------------------------------- |
+| 50 req/s por 2 minutos            | 6.001 requisições, 0% de erros, p95 de 6,5 ms   |
+| 400 req/s por 1 minuto            | 23.955 requisições, 0% de erros, p95 de 20,9 ms |
+| Atraso da consolidação (p50, p95) | 0,26 s, 0,5 s                                   |
 
-The required peak is reached with an 8x margin before any horizontal scaling.
+O pico exigido é atingido com margem de 8 vezes antes de qualquer escala horizontal.
 
-## 10. Availability and resilience
+## 10. Disponibilidade e resiliência
 
-| Component down         | Recording entries           | Reading balances                                               | Events                                                 |
-| ---------------------- | --------------------------- | -------------------------------------------------------------- | ------------------------------------------------------ |
-| daily-balance-consumer | Unaffected                  | Serves data consolidated so far                                | Accumulate in the durable queue                        |
-| Daily balance database | Unaffected                  | Cached reports served as `STALE`; others `503` + `Retry-After` | Retried through the retry queue, then DLQ and redrive  |
-| Redis                  | Unaffected                  | Served from the database; circuit opens after 5 failures       | Unaffected                                             |
-| RabbitMQ               | Unaffected                  | Serves data consolidated so far                                | Accumulate in the outbox; relay and consumer reconnect |
-| ledger-outbox-relay    | Unaffected                  | Serves data consolidated so far                                | Accumulate in the outbox                               |
-| daily-balance API      | Unaffected                  | Unavailable                                                    | Still consumed                                         |
-| Keycloak               | Unaffected for valid tokens | Unaffected for valid tokens                                    | Unaffected                                             |
+| Componente fora do ar  | Registro de lançamentos           | Consulta de saldos                                                          | Eventos                                           |
+| ---------------------- | --------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------- |
+| daily-balance-consumer | Não é afetado                     | Responde com os dados consolidados até o momento                            | Acumulam na fila durável                          |
+| Banco do consolidado   | Não é afetado                     | Relatórios em cache servidos como `STALE`; os demais, `503` + `Retry-After` | Passam pela fila de retry, depois DLQ e redrive   |
+| Redis                  | Não é afetado                     | Respondida pelo banco; o circuito abre após 5 falhas                        | Não são afetados                                  |
+| RabbitMQ               | Não é afetado                     | Responde com os dados consolidados até o momento                            | Acumulam no outbox; relay e consumidor reconectam |
+| ledger-outbox-relay    | Não é afetado                     | Responde com os dados consolidados até o momento                            | Acumulam no outbox                                |
+| API daily-balance      | Não é afetado                     | Indisponível                                                                | Continuam sendo consumidos                        |
+| Keycloak               | Não é afetado para tokens válidos | Não é afetada para tokens válidos                                           | Não são afetados                                  |
 
-Every row was exercised locally; the first three are part of the automated resilience tests.
+Todas as linhas foram exercitadas localmente; as três primeiras fazem parte dos testes automatizados de resiliência.
 
-| Target (production)    | Ledger                                                                                    | Daily balance                                                                                |
-| ---------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Availability objective | 99.9% monthly                                                                             | 99.5% monthly, at most 5% loss at peak                                                       |
-| RPO                    | ≈ 0 (Multi-AZ synchronous standby)                                                        | ≈ 0; in the worst case the balance is rebuilt from the journal or by replaying ledger events |
-| RTO                    | Minutes (Multi-AZ failover, ECS task replacement)                                         | Minutes; reads continue from the stale cache meanwhile                                       |
-| Disaster recovery      | Cross-region snapshot copy (e.g. us-east-1), infrastructure as code to recreate the stack | Same; the daily balance can be fully recomputed from the ledger                              |
+| Alvo (produção)             | Ledger                                                                                                  | Consolidado                                                                                        |
+| --------------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Objetivo de disponibilidade | 99,9% ao mês                                                                                            | 99,5% ao mês, com no máximo 5% de perda no pico                                                    |
+| RPO                         | ≈ 0 (standby síncrono Multi-AZ)                                                                         | ≈ 0; no pior caso, o saldo é reconstruído a partir do diário ou reprocessando os eventos do ledger |
+| RTO                         | Minutos (failover Multi-AZ, substituição de tasks no ECS)                                               | Minutos; enquanto isso, as leituras continuam pelo cache obsoleto                                  |
+| Recuperação de desastres    | Cópia de snapshots para outra região (ex.: us-east-1) e infraestrutura como código para recriar a stack | O mesmo; o consolidado pode ser inteiramente recalculado a partir do ledger                        |
 
-Health checks: `/health/live` for process liveness and `/health/ready` with dependency status (`up`, `degraded`, `down`). In the daily balance API, PostgreSQL and Redis are not critical for readiness, so a shared dependency outage does not remove every replica from the load balancer at once.
+Health checks: `/health/live` para a vivacidade do processo e `/health/ready` com o estado das dependências (`up`, `degraded`, `down`). Na API do consolidado, PostgreSQL e Redis não são críticos para o readiness, então a queda de uma dependência compartilhada não tira todas as réplicas do load balancer de uma vez.
 
-## 11. Consistency model
+## 11. Modelo de consistência
 
-| Area                   | Model                                                                                                                |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Ledger                 | Strongly consistent. An entry, its idempotency record and its event are committed atomically                         |
-| Ledger → daily balance | Eventually consistent, at-least-once delivery. Measured lag p95 of 0.5 s; the cache can add up to 5 s                |
-| Daily balance          | Exactly-once effect: deduplication by event id and entry id in the same transaction as the additive upsert           |
-| Ordering               | Not required: sums are commutative, and a reversal never depends on its original having been consolidated first      |
-| Repair                 | `rebuild-day` recomputes a day from the journal; `redrive-dead-letters` reprocesses the DLQ; both are safe to repeat |
+| Área                 | Modelo                                                                                                                              |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Ledger               | Fortemente consistente. O lançamento, seu registro de idempotência e seu evento são gravados atomicamente                           |
+| Ledger → consolidado | Eventualmente consistente, com entrega at-least-once. Atraso medido com p95 de 0,5 s; o cache pode acrescentar até 5 s              |
+| Consolidado          | Efeito exactly-once: deduplicação por id do evento e id do lançamento na mesma transação do upsert aditivo                          |
+| Ordem                | Não é necessária: somas são comutativas, e um estorno nunca depende de o original ter sido consolidado antes                        |
+| Reparo               | `rebuild-day` recalcula um dia a partir do diário; `redrive-dead-letters` reprocessa a DLQ; ambos podem ser repetidos com segurança |
 
-## 12. Architecture decisions
+## 12. Decisões de arquitetura
 
-| ADR                                                         | Decision                                            |
-| ----------------------------------------------------------- | --------------------------------------------------- |
-| [0001](adr/0001-record-architecture-decisions.md)           | Record architecture decisions                       |
-| [0002](adr/0002-event-driven-microservices.md)              | Two event-driven microservices                      |
-| [0003](adr/0003-hexagonal-architecture.md)                  | Hexagonal architecture inside each service          |
-| [0004](adr/0004-postgresql-database-per-service.md)         | PostgreSQL, one database per service                |
-| [0005](adr/0005-transactional-outbox-with-polling-relay.md) | Transactional outbox with a polling relay           |
-| [0006](adr/0006-rabbitmq-message-broker.md)                 | RabbitMQ as the message broker                      |
-| [0007](adr/0007-cloudevents-shared-contracts.md)            | CloudEvents and a shared contracts package          |
-| [0008](adr/0008-materialized-daily-balance.md)              | Materialized daily balance with idempotent consumer |
-| [0009](adr/0009-business-date-and-time-zones.md)            | Business date and time zones per point of sale      |
-| [0010](adr/0010-cache-and-circuit-breakers.md)              | Cache with stale fallback and circuit breakers      |
-| [0011](adr/0011-keycloak-jwt-scopes.md)                     | Keycloak, JWT and scopes                            |
-| [0012](adr/0012-opentelemetry-grafana-stack.md)             | OpenTelemetry with the Grafana stack                |
-| [0013](adr/0013-nodejs-typescript-fastify.md)               | Node.js, TypeScript and Fastify                     |
+| ADR                                                         | Decisão                                                  |
+| ----------------------------------------------------------- | -------------------------------------------------------- |
+| [0001](adr/0001-record-architecture-decisions.md)           | Registrar as decisões de arquitetura                     |
+| [0002](adr/0002-event-driven-microservices.md)              | Dois microsserviços orientados a eventos                 |
+| [0003](adr/0003-hexagonal-architecture.md)                  | Arquitetura hexagonal dentro de cada serviço             |
+| [0004](adr/0004-postgresql-database-per-service.md)         | PostgreSQL, um banco por serviço                         |
+| [0005](adr/0005-transactional-outbox-with-polling-relay.md) | Transactional outbox com relay por polling               |
+| [0006](adr/0006-rabbitmq-message-broker.md)                 | RabbitMQ como message broker                             |
+| [0007](adr/0007-cloudevents-shared-contracts.md)            | CloudEvents e um pacote de contratos compartilhado       |
+| [0008](adr/0008-materialized-daily-balance.md)              | Saldo diário materializado com consumidor idempotente    |
+| [0009](adr/0009-business-date-and-time-zones.md)            | Data de competência e fusos por ponto de venda           |
+| [0010](adr/0010-cache-and-circuit-breakers.md)              | Cache com fallback para dado obsoleto e circuit breakers |
+| [0011](adr/0011-keycloak-jwt-scopes.md)                     | Keycloak, JWT e escopos                                  |
+| [0012](adr/0012-opentelemetry-grafana-stack.md)             | OpenTelemetry com a stack do Grafana                     |
+| [0013](adr/0013-nodejs-typescript-fastify.md)               | Node.js, TypeScript e Fastify                            |

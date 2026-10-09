@@ -1,68 +1,68 @@
-# ADR-0003: Hexagonal architecture inside each service
+# ADR-0003: Arquitetura hexagonal em cada serviço
 
-- **Status:** Accepted
-- **Date:** 2026-10-09
+- **Status:** Aceita
+- **Data:** 2026-10-09
 
-## Context
+## Contexto
 
-In a microservice system, the parts most likely to change are the edges: the contract of the events exchanged between the two services (new fields, a `v2` of an event, a different envelope), the broker (RabbitMQ could become SQS or Kafka), the HTTP API consumed by other systems and, less often, the database. The business rules of cash entries and daily balances, on the other hand, are stable. A structure where business logic imports framework, driver or message formats directly would turn every contract change into a change of the core.
+Em um sistema de microsserviços, as partes com maior chance de mudar são as bordas: o contrato dos eventos trocados entre os dois serviços (novos campos, uma `v2` de um evento, outro envelope), o broker (o RabbitMQ pode virar SQS ou Kafka), a API HTTP consumida por outros sistemas e, com menos frequência, o banco de dados. Já as regras de negócio de lançamentos e saldos diários são estáveis. Uma estrutura em que a lógica de negócio importa diretamente framework, driver ou formato de mensagem transformaria cada mudança de contrato em uma mudança do núcleo.
 
-## Decision
+## Decisão
 
-Both services follow **Ports and Adapters (hexagonal architecture)** with dependencies always pointing inward:
+Os dois serviços seguem **Ports and Adapters (arquitetura hexagonal)**, com as dependências sempre apontando para dentro:
 
 ```
 src/
-├─ domain/        entities, value objects, domain events and errors (no I/O, no frameworks)
-├─ application/   use cases, inbound ports (what the outside calls) and outbound ports (what the use cases need)
+├─ domain/        entidades, value objects, eventos e erros de domínio (sem I/O, sem frameworks)
+├─ application/   casos de uso, ports de entrada (o que o mundo externo chama) e de saída (o que os casos de uso precisam)
 ├─ adapters/
-│  ├─ inbound/    HTTP routes, message consumer, polling worker
-│  └─ outbound/   PostgreSQL, RabbitMQ, Redis, telemetry, system clock
-├─ config/        environment validation
-└─ container.ts   composition root wiring adapters into use cases
+│  ├─ inbound/    rotas HTTP, consumidor de mensagens, worker de polling
+│  └─ outbound/   PostgreSQL, RabbitMQ, Redis, telemetria, relógio do sistema
+├─ config/        validação do ambiente
+└─ container.ts   composition root que conecta os adapters aos casos de uso
 ```
 
-Rules:
+Regras:
 
-- the domain does not import anything outside the domain;
-- use cases depend only on port interfaces;
-- the translation between the internal model and an external contract lives in exactly one adapter (for example the event mapper in the ledger and the event translator in the daily balance, which acts as an anti-corruption layer);
-- concrete adapters are chosen only in the composition root.
+- o domínio não importa nada de fora do domínio;
+- os casos de uso dependem apenas de interfaces (ports);
+- a tradução entre o modelo interno e um contrato externo fica em exatamente um adapter (por exemplo, o mapper de eventos no ledger e o translator de eventos no consolidado, que funciona como camada anticorrupção);
+- os adapters concretos são escolhidos apenas no composition root.
 
-Tactical DDD complements it: value objects (`Money`, `BusinessDate`, `TimeZone`, identifiers) make invalid states unrepresentable, and the `Entry` aggregate owns the reversal rules and raises domain events.
+O DDD tático complementa a abordagem: value objects (`Money`, `BusinessDate`, `TimeZone`, identificadores) tornam estados inválidos irrepresentáveis, e o agregado `Entry` concentra as regras de estorno e emite os eventos de domínio.
 
-## Alternatives considered
+## Alternativas consideradas
 
-| Alternative                    | Why it was not chosen                                                                                              |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Layered architecture (MVC-ish) | Business logic tends to depend on the persistence layer and framework types; harder to test without infrastructure |
-| Framework-centric (NestJS)     | Couples the structure to the framework's modules and decorators; more weight than the scope requires               |
-| Clean Architecture in full     | Same principle with more layers and ceremony (presenters, separate entity and use case rings) for little gain here |
+| Alternativa                         | Por que não foi escolhida                                                                                                          |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Arquitetura em camadas (estilo MVC) | A lógica de negócio tende a depender da camada de persistência e dos tipos do framework; mais difícil de testar sem infraestrutura |
+| Centrada no framework (NestJS)      | Acopla a estrutura aos módulos e decorators do framework; mais pesada do que o escopo exige                                        |
+| Clean Architecture completa         | Mesmo princípio, com mais camadas e cerimônia (presenters, anéis separados de entidades e casos de uso) para pouco ganho aqui      |
 
-## Consequences
+## Consequências
 
-**Positive**
+**Positivas**
 
-| Change                                       | What changes                                                     | What does not change                    |
-| -------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------- |
-| New field or `v2` of an event                | Contracts package and the mapper/translator                      | Domain, use cases                       |
-| Publishing `v1` and `v2` during a transition | Only the mapper                                                  | Domain, use cases and the other service |
-| RabbitMQ replaced by SQS or Kafka            | A new adapter implementing the publisher port and a new consumer | Domain, use cases, outbox and contracts |
-| New HTTP version or protocol                 | Inbound adapter                                                  | Domain and use cases                    |
-| Database replaced                            | Repository adapters                                              | Domain, use cases and their unit tests  |
+| Mudança                                    | O que muda                                                               | O que não muda                                |
+| ------------------------------------------ | ------------------------------------------------------------------------ | --------------------------------------------- |
+| Novo campo ou `v2` de um evento            | Pacote de contratos e o mapper/translator                                | Domínio, casos de uso                         |
+| Publicar `v1` e `v2` durante uma transição | Apenas o mapper                                                          | Domínio, casos de uso e o outro serviço       |
+| RabbitMQ substituído por SQS ou Kafka      | Um novo adapter que implementa o port de publicação e um novo consumidor | Domínio, casos de uso, outbox e contratos     |
+| Nova versão ou protocolo HTTP              | Adapter de entrada                                                       | Domínio e casos de uso                        |
+| Troca do banco de dados                    | Adapters de repositório                                                  | Domínio, casos de uso e seus testes unitários |
 
-- The core is unit tested with in-memory fakes and no infrastructure (more than 290 unit tests across both services run in about one second); adapters have their own integration tests against real PostgreSQL, RabbitMQ, Redis and Keycloak containers.
-- Cross-cutting concerns stayed out of the core: authentication lives in the HTTP adapter and the use cases only receive a `merchantId`; metrics live in adapters and the domain has no dependency on OpenTelemetry.
+- O núcleo é testado com fakes em memória e sem infraestrutura (mais de 290 testes unitários nos dois serviços rodam em cerca de um segundo); os adapters têm testes de integração próprios contra containers reais de PostgreSQL, RabbitMQ, Redis e Keycloak.
+- Preocupações transversais ficaram fora do núcleo: a autenticação está no adapter HTTP e os casos de uso recebem apenas um `merchantId`; as métricas ficam nos adapters e o domínio não depende de OpenTelemetry.
 
-**Negative / trade-offs**
+**Negativas / trade-offs**
 
-- More interfaces and files than a simple layered design. Accepted because contract changes are frequent in distributed systems and the cost of a change stays small.
-- Some duplication between services (infrastructure adapters such as the PostgreSQL connection, migrator and RabbitMQ connection exist in both). This is deliberate: only the event contracts are shared, so each service can evolve its infrastructure without coordinated releases.
+- Mais interfaces e arquivos do que um desenho simples em camadas. Aceito porque mudanças de contrato são frequentes em sistemas distribuídos e o custo de cada mudança continua pequeno.
+- Alguma duplicação entre os serviços (adapters de infraestrutura como a conexão com o PostgreSQL, o migrator e a conexão com o RabbitMQ existem nos dois). É deliberado: apenas os contratos de eventos são compartilhados, para que cada serviço evolua sua infraestrutura sem releases coordenados.
 
-## Evidence
+## Evidências
 
-- Ledger ports: [application/ports](../../services/ledger/src/application/ports/outbound/entry-repository.ts), composition root [container.ts](../../services/ledger/src/container.ts)
-- Event mapping in one adapter: [ledger-event-mapper.ts](../../services/ledger/src/adapters/outbound/messaging/ledger-event-mapper.ts)
-- Anti-corruption layer on the consumer side: [ledger-event-translator.ts](../../services/daily-balance/src/adapters/inbound/messaging/ledger-event-translator.ts)
-- Publisher port with a replaceable adapter: [event-publisher.ts](../../services/ledger/src/application/ports/outbound/event-publisher.ts), [rabbitmq-event-publisher.ts](../../services/ledger/src/adapters/outbound/messaging/rabbitmq-event-publisher.ts)
-- Domain aggregate: [entry.ts](../../services/ledger/src/domain/entry/entry.ts)
+- Ports do ledger: [application/ports](../../services/ledger/src/application/ports/outbound/entry-repository.ts), composition root [container.ts](../../services/ledger/src/container.ts)
+- Mapeamento de eventos em um único adapter: [ledger-event-mapper.ts](../../services/ledger/src/adapters/outbound/messaging/ledger-event-mapper.ts)
+- Camada anticorrupção no lado consumidor: [ledger-event-translator.ts](../../services/daily-balance/src/adapters/inbound/messaging/ledger-event-translator.ts)
+- Port de publicação com adapter substituível: [event-publisher.ts](../../services/ledger/src/application/ports/outbound/event-publisher.ts), [rabbitmq-event-publisher.ts](../../services/ledger/src/adapters/outbound/messaging/rabbitmq-event-publisher.ts)
+- Agregado de domínio: [entry.ts](../../services/ledger/src/domain/entry/entry.ts)

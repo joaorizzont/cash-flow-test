@@ -1,35 +1,35 @@
-# ADR-0001: Record architecture decisions
+# ADR-0001: Registrar as decisões de arquitetura
 
-- **Status:** Accepted
-- **Date:** 2026-10-09
+- **Status:** Aceita
+- **Data:** 2026-10-09
 
-## Context
+## Contexto
 
-The solution was built in phases, and many decisions were made along the way: some planned upfront (service split, messaging), others forced by what testing revealed (per-message retry in the outbox relay, handling of idle connection loss, readiness semantics for shared dependencies). Code shows _what_ was done but not _why_, nor which alternatives were considered. The code itself has no comments by convention, so the reasoning must live somewhere else.
+A solução foi construída em fases, e muitas decisões foram tomadas ao longo do caminho: algumas planejadas de antemão (divisão em serviços, mensageria), outras impostas pelo que os testes revelaram (retentativa por mensagem no relay do outbox, tratamento da perda de conexões ociosas, semântica do readiness para dependências compartilhadas). O código mostra _o que_ foi feito, mas não _por que_, nem quais alternativas foram consideradas. Por convenção, o código não tem comentários, então o raciocínio precisa ficar registrado em outro lugar.
 
-## Decision
+## Decisão
 
-Architecturally significant decisions are recorded as lightweight Architecture Decision Records, following Michael Nygard's format, in `docs/adr/`:
+As decisões arquiteturalmente significativas são registradas como Architecture Decision Records leves, no formato de Michael Nygard, em `docs/adr/`:
 
-- one file per decision, numbered sequentially and never renumbered;
-- sections: Context, Decision, Alternatives considered, Consequences, and Evidence pointing to the code that implements the decision;
-- an ADR is immutable once accepted; a change of direction is a new ADR that supersedes the old one, and the old one has its status updated to `Superseded by ADR-XXXX`;
-- ADRs are written in English, like the rest of the technical documentation; the README (in Portuguese) keeps a summarized justification table and links here.
+- um arquivo por decisão, numerado em sequência e nunca renumerado;
+- seções: Contexto, Decisão, Alternativas consideradas, Consequências e Evidências, apontando para o código que implementa a decisão;
+- um ADR é imutável depois de aceito; uma mudança de direção é um novo ADR que substitui o anterior, e o anterior tem o status atualizado para `Substituída pela ADR-XXXX`;
+- os ADRs fazem parte da documentação do projeto em `docs/`; o README mantém uma tabela resumida de justificativas e aponta para cá.
 
-## Alternatives considered
+## Alternativas consideradas
 
-| Alternative                         | Why it was not chosen                                                                |
-| ----------------------------------- | ------------------------------------------------------------------------------------ |
-| Comments in the code                | The project forbids comments; and comments describe code, not discarded alternatives |
-| A wiki or document outside the repo | Drifts from the code and is lost when the repository is cloned or forked             |
-| Only the README justification table | Good for a summary, but too short to record context and consequences                 |
+| Alternativa                                 | Por que não foi escolhida                                                                                 |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Comentários no código                       | O projeto proíbe comentários; além disso, comentários descrevem o código, não as alternativas descartadas |
+| Uma wiki ou documento fora do repositório   | Diverge do código e se perde quando o repositório é clonado ou copiado                                    |
+| Apenas a tabela de justificativas do README | Boa como resumo, mas curta demais para registrar contexto e consequências                                 |
 
-## Consequences
+## Consequências
 
-- **Positive:** reviewers and future maintainers can understand trade-offs without reconstructing them; decisions are reviewed in pull requests together with the code that implements them.
-- **Negative:** ADRs must be kept in sync when a decision is revisited; this is mitigated by the supersede rule instead of editing history.
+- **Positivas:** avaliadores e futuros mantenedores entendem os trade-offs sem precisar reconstruí-los; as decisões são revisadas nos pull requests junto com o código que as implementa.
+- **Negativas:** os ADRs precisam ser mantidos coerentes quando uma decisão é revista; isso é mitigado pela regra de substituição, em vez de editar o histórico.
 
-## Evidence
+## Evidências
 
-- Index: [README.md](README.md)
-- Summary in Portuguese: [README "Justificativa das decisões de arquitetura e tecnologia"](../../README.md#justificativa-das-decisões-de-arquitetura-e-tecnologia)
+- Índice: [README.md](README.md)
+- Resumo no README do repositório: [README "Justificativa das decisões de arquitetura e tecnologia"](../../README.md#justificativa-das-decisões-de-arquitetura-e-tecnologia)

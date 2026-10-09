@@ -1,106 +1,106 @@
-# Future evolutions
+# Evoluções futuras
 
-The challenge welcomes a description of what would be implemented next. This document lists evolutions by theme and priority, and the known limitations of the current implementation.
+O desafio aceita bem uma descrição do que seria implementado em seguida. Este documento lista as evoluções por tema e prioridade, além das limitações conhecidas da implementação atual.
 
-Priority:
+Prioridade:
 
-- **Now**: needed before a real production rollout.
-- **Next**: valuable in the first months of operation.
-- **Later**: depends on scale or product direction.
+- **Agora**: necessário antes de uma entrada real em produção.
+- **Próximo**: valioso nos primeiros meses de operação.
+- **Depois**: depende da escala ou da direção do produto.
 
-## Known limitations of the current implementation
+## Limitações conhecidas da implementação atual
 
-| Limitation                                        | Why it is acceptable today                                   | Evolution                                                            |
-| ------------------------------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------- |
-| Rate limiting is in memory, per replica           | One replica per process locally                              | Shared store (Redis) or API gateway limits                           |
-| Password grant (ROPC) enabled on the client       | Needed for local scripts and load tests                      | Disable in production; Authorization Code with PKCE only             |
-| 100% of traces sampled                            | Local volume is small                                        | Ratio or tail sampling in the Collector, always keeping error traces |
-| Published outbox rows are never deleted           | Small volume; also useful to replay events                   | Cleanup job with a retention window                                  |
-| Idempotency keys never expire                     | Small volume                                                 | Expiry after 24–72 h                                                 |
-| Single currency (BRL)                             | The challenge describes one merchant in Brazil               | Multi-currency, see Data                                             |
-| Consolidation lag bounded by the polling interval | p95 0.5 s, far below what a daily report needs               | `LISTEN/NOTIFY` wake-up or CDC                                       |
-| Circuit breaker state per process                 | Each replica protects itself                                 | Acceptable; shared state is rarely worth it                          |
-| Alerts with fixed thresholds, no Alertmanager     | Visible in Prometheus locally                                | Burn-rate alerts routed through Alertmanager                         |
-| Stale cache entries can be served for up to 24 h  | Only during a database outage, signalled by `x-cache: STALE` | Tune per merchant needs                                              |
+| Limitação                                                   | Por que é aceitável hoje                                       | Evolução                                                                                   |
+| ----------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Rate limiting em memória, por réplica                       | Uma réplica por processo no ambiente local                     | Armazenamento compartilhado (Redis) ou limites no API Gateway                              |
+| Fluxo de senha (ROPC) habilitado no client                  | Necessário para os scripts locais e os testes de carga         | Desabilitar em produção; apenas Authorization Code com PKCE                                |
+| 100% dos traces amostrados                                  | O volume local é pequeno                                       | Amostragem por proporção ou tail sampling no Collector, mantendo sempre os traces com erro |
+| Linhas publicadas do outbox nunca são apagadas              | Volume pequeno; também é útil para reprocessar eventos         | Job de limpeza com janela de retenção                                                      |
+| Chaves de idempotência nunca expiram                        | Volume pequeno                                                 | Expiração após 24–72 h                                                                     |
+| Moeda única (BRL)                                           | O desafio descreve um comerciante no Brasil                    | Múltiplas moedas, veja Dados                                                               |
+| Atraso da consolidação limitado pelo intervalo de polling   | p95 de 0,5 s, muito abaixo do que um relatório diário precisa  | Despertar o relay com `LISTEN/NOTIFY` ou usar CDC                                          |
+| Estado do circuit breaker por processo                      | Cada réplica se protege sozinha                                | Aceitável; estado compartilhado raramente compensa                                         |
+| Alertas com limites fixos, sem Alertmanager                 | Visíveis no Prometheus no ambiente local                       | Alertas por burn rate encaminhados pelo Alertmanager                                       |
+| Entradas obsoletas do cache podem ser servidas por até 24 h | Só durante uma queda do banco, sinalizada por `x-cache: STALE` | Ajustar conforme a necessidade dos comerciantes                                            |
 
-## Platform
+## Plataforma
 
-| Priority | Evolution                                                                                                          | Rationale                                                                                                                                                                       |
-| -------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Now      | Infrastructure as code (Terraform) for the target cloud (ECS/EKS, RDS, Amazon MQ or SQS, ElastiCache)              | Reproducible environments and reviewable infrastructure changes                                                                                                                 |
-| Now      | SNS + SQS adapters for the production messaging target (publisher and consumer), with LocalStack integration tests | Production messaging at a fraction of the cost of a broker cluster; the ports and the message handler are reused as they are ([target architecture](03-target-architecture.md)) |
-| Now      | CI/CD pipeline with lint, tests, coverage, image scanning and automated deploys                                    | Every change goes through the same quality gates                                                                                                                                |
-| Next     | Kubernetes with Helm charts and GitOps (Argo CD) if the organization runs Kubernetes                               | Declarative deployments, rollbacks and drift detection                                                                                                                          |
-| Next     | Canary or blue/green deployments with automatic rollback on SLO burn                                               | Limits the blast radius of a bad release                                                                                                                                        |
-| Later    | Multi-region active/passive                                                                                        | Only if the business needs regional disaster tolerance beyond multi-AZ                                                                                                          |
+| Prioridade | Evolução                                                                                                                     | Justificativa                                                                                                                                                                           |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Agora      | Infraestrutura como código (Terraform) para a nuvem alvo (ECS/EKS, RDS, Amazon MQ ou SQS, ElastiCache)                       | Ambientes reproduzíveis e mudanças de infraestrutura revisáveis                                                                                                                         |
+| Agora      | Adapters de SNS + SQS para o alvo de mensageria em produção (publisher e consumidor), com testes de integração no LocalStack | Mensageria em produção por uma fração do custo de um cluster de broker; os ports e o handler de mensagens são reaproveitados como estão ([arquitetura alvo](03-target-architecture.md)) |
+| Agora      | Pipeline de CI/CD com lint, testes, cobertura, varredura de imagens e deploys automatizados                                  | Toda mudança passa pelos mesmos critérios de qualidade                                                                                                                                  |
+| Próximo    | Kubernetes com Helm charts e GitOps (Argo CD), se a organização usar Kubernetes                                              | Deploys declarativos, rollbacks e detecção de divergência de configuração                                                                                                               |
+| Próximo    | Deploys canary ou blue/green com rollback automático quando o SLO começar a queimar                                          | Limita o raio de impacto de uma release ruim                                                                                                                                            |
+| Depois     | Multirregião ativo/passivo                                                                                                   | Somente se o negócio precisar de tolerância a desastres regionais além do Multi-AZ                                                                                                      |
 
-## Messaging
+## Mensageria
 
-| Priority | Evolution                                                              | Rationale                                                                                    |
-| -------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Now      | Outbox cleanup job                                                     | Keeps the table small; the retention window must cover the replay needs of disaster recovery |
-| Next     | `LISTEN/NOTIFY` to wake the relay, keeping polling as a safety net     | Near-zero publish latency with little operational cost                                       |
-| Next     | Schema registry (Apicurio or Confluent) when more teams consume events | Contract governance and compatibility checks outside a single repository                     |
-| Later    | CDC with Debezium reading the WAL instead of polling                   | Millisecond latency and no polling, worth it at much higher volume                           |
-| Later    | Partitioning by merchant if ordered processing is ever required        | Today ordering is not needed because balance updates are commutative                         |
+| Prioridade | Evolução                                                                          | Justificativa                                                                                                               |
+| ---------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Agora      | Job de limpeza do outbox                                                          | Mantém a tabela pequena; a janela de retenção precisa cobrir as necessidades de reprocessamento da recuperação de desastres |
+| Próximo    | `LISTEN/NOTIFY` para despertar o relay, mantendo o polling como rede de segurança | Latência de publicação próxima de zero com pouco custo operacional                                                          |
+| Próximo    | Schema registry (Apicurio ou Confluent) quando mais times consumirem eventos      | Governança de contratos e verificação de compatibilidade fora de um único repositório                                       |
+| Depois     | CDC com Debezium lendo o WAL em vez de polling                                    | Latência de milissegundos e sem polling; compensa com volume muito maior                                                    |
+| Depois     | Particionamento por comerciante, se algum dia for necessário processar em ordem   | Hoje a ordem não importa, porque as atualizações do saldo são comutativas                                                   |
 
-## Data
+## Dados
 
-| Priority | Evolution                                                                                                                                                       | Rationale                                                                                                                                                    |
-| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Next     | Historical import: a batch endpoint (separate scope and audit trail) that accepts entries older than the backdating window, with deterministic idempotency keys | Required to migrate a legacy system's history ([transition architecture](04-transition-architecture.md)); the regular API rightly rejects old business dates |
-| Next     | Closing of business days and months (locking past periods)                                                                                                      | Accounting needs immutable closed periods; today entries can be backdated up to 30 days                                                                      |
-| Next     | Read replicas for the daily balance database                                                                                                                    | Offload heavy period reports                                                                                                                                 |
-| Later    | Monthly partitioning of `entries` and `applied_movements`                                                                                                       | Keeps indexes small and enables cheap archival                                                                                                               |
-| Later    | Archival of closed periods to object storage                                                                                                                    | Lower storage cost, compliance retention                                                                                                                     |
-| Later    | Multi-currency with explicit conversion rules                                                                                                                   | Merchants operating abroad; balances per currency                                                                                                            |
+| Prioridade | Evolução                                                                                                                                                                                             | Justificativa                                                                                                                                                                        |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Próximo    | Importação histórica: um endpoint em lote (com escopo e trilha de auditoria próprios) que aceite lançamentos mais antigos que a janela de retroatividade, com chaves de idempotência determinísticas | Necessária para migrar o histórico de um sistema legado ([arquitetura de transição](04-transition-architecture.md)); a API comum rejeita, corretamente, datas de competência antigas |
+| Próximo    | Fechamento de dias e meses (bloqueio de períodos passados)                                                                                                                                           | A contabilidade exige períodos fechados e imutáveis; hoje é possível lançar com até 30 dias de retroatividade                                                                        |
+| Próximo    | Réplicas de leitura para o banco do consolidado                                                                                                                                                      | Descarregar relatórios de período pesados                                                                                                                                            |
+| Depois     | Particionamento mensal de `entries` e `applied_movements`                                                                                                                                            | Mantém os índices pequenos e permite arquivamento barato                                                                                                                             |
+| Depois     | Arquivamento de períodos fechados em object storage                                                                                                                                                  | Menor custo de armazenamento, retenção para conformidade                                                                                                                             |
+| Depois     | Múltiplas moedas com regras explícitas de conversão                                                                                                                                                  | Comerciantes que operam no exterior; saldos por moeda                                                                                                                                |
 
-## Product features
+## Funcionalidades do produto
 
-| Priority | Evolution                                                                   | Rationale                                                                    |
-| -------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Next     | Categories and cost centers for entries, with reports by category           | Turns the cash flow into a management tool                                   |
-| Next     | Report export (CSV, PDF) and scheduled e-mail of the daily closing          | Common merchant request                                                      |
-| Next     | Multiple users per merchant with fine-grained permissions                   | The role model already supports operator and viewer; extend to more profiles |
-| Later    | Integrations with POS and payment acquirers via webhooks                    | Entries recorded automatically from sales and settlements                    |
-| Later    | Bank reconciliation (OFX/CNAB import) matching statement lines with entries | Detects missing or duplicated entries                                        |
-| Later    | Cash flow forecasting based on history and receivables                      | Helps merchants plan ahead                                                   |
-| Later    | Notifications (low or negative balance, unusual movements)                  | Proactive value from the same events                                         |
+| Prioridade | Evolução                                                                                 | Justificativa                                                                |
+| ---------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Próximo    | Categorias e centros de custo para os lançamentos, com relatórios por categoria          | Transforma o fluxo de caixa em uma ferramenta de gestão                      |
+| Próximo    | Exportação de relatórios (CSV, PDF) e envio agendado por e-mail do fechamento diário     | Pedido comum dos comerciantes                                                |
+| Próximo    | Vários usuários por comerciante com permissões granulares                                | O modelo de papéis já suporta operador e analista; estender para mais perfis |
+| Depois     | Integrações com POS e adquirentes via webhooks                                           | Lançamentos registrados automaticamente a partir de vendas e liquidações     |
+| Depois     | Conciliação bancária (importação de OFX/CNAB) cruzando linhas do extrato com lançamentos | Detecta lançamentos ausentes ou duplicados                                   |
+| Depois     | Previsão de fluxo de caixa com base no histórico e nos recebíveis                        | Ajuda os comerciantes a planejar                                             |
+| Depois     | Notificações (saldo baixo ou negativo, movimentações incomuns)                           | Valor proativo a partir dos mesmos eventos                                   |
 
-## Quality
+## Qualidade
 
-| Priority | Evolution                                                               | Rationale                                                                               |
-| -------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Now      | Contract tests (Pact) for events and APIs                               | Detects breaking changes between producer and consumers before deployment               |
-| Next     | Property-based tests for money, balance composition and business dates  | Explores edge cases (time zones, overflow, many movements) beyond hand-written examples |
-| Next     | Load and resilience tests in the pipeline against a staging environment | Requirements verified on every release, not only locally                                |
-| Later    | Mutation testing                                                        | Measures the strength of the test suite                                                 |
-| Later    | Chaos experiments (network latency, broker partitions)                  | Validates behaviour beyond clean stop/start outages                                     |
+| Prioridade | Evolução                                                                                  | Justificativa                                                                                |
+| ---------- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Agora      | Testes de contrato (Pact) para eventos e APIs                                             | Detecta mudanças incompatíveis entre produtor e consumidores antes do deploy                 |
+| Próximo    | Testes baseados em propriedades para dinheiro, composição do saldo e datas de competência | Explora casos de borda (fusos, overflow, muitos movimentos) além dos exemplos escritos à mão |
+| Próximo    | Testes de carga e resiliência no pipeline contra um ambiente de staging                   | Requisitos verificados a cada release, não só localmente                                     |
+| Depois     | Testes de mutação                                                                         | Mede a força da suíte de testes                                                              |
+| Depois     | Experimentos de caos (latência de rede, partições do broker)                              | Valida o comportamento além de quedas limpas de parar e subir                                |
 
-## Security
+## Segurança
 
-| Priority | Evolution                                                               | Rationale                                              |
-| -------- | ----------------------------------------------------------------------- | ------------------------------------------------------ |
-| Now      | Secrets in a manager (AWS Secrets Manager, Vault) with rotation         | No credentials in configuration files                  |
-| Now      | TLS everywhere; mTLS between services through a service mesh if adopted | Encryption in transit inside the network               |
-| Next     | OAuth client credentials for system integrations (POS, acquirers)       | Machine identities separate from user identities       |
-| Next     | WAF rules and bot protection at the edge                                | Protects the APIs before traffic reaches the services  |
-| Next     | Audit log export to a SIEM                                              | Who recorded or reversed what, retained and searchable |
+| Prioridade | Evolução                                                                       | Justificativa                                                |
+| ---------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| Agora      | Segredos em um gerenciador (AWS Secrets Manager, Vault) com rotação            | Nenhuma credencial em arquivos de configuração               |
+| Agora      | TLS em todo lugar; mTLS entre serviços por meio de um service mesh, se adotado | Criptografia em trânsito dentro da rede                      |
+| Próximo    | OAuth client credentials para integrações de sistemas (POS, adquirentes)       | Identidades de máquina separadas das identidades de usuários |
+| Próximo    | Regras de WAF e proteção contra bots na borda                                  | Protege as APIs antes que o tráfego chegue aos serviços      |
+| Próximo    | Exportação do log de auditoria para um SIEM                                    | Quem registrou ou estornou o quê, retido e pesquisável       |
 
-## Observability
+## Observabilidade
 
-| Priority | Evolution                                               | Rationale                                                             |
-| -------- | ------------------------------------------------------- | --------------------------------------------------------------------- |
-| Now      | Alertmanager with routing by severity and runbook links | Alerts reach people; runbooks are in [operations](07-operations.md)   |
-| Next     | SLO burn-rate alerts                                    | Alert on how fast the error budget is consumed, not on raw thresholds |
-| Next     | Exemplars linking metric spikes to traces               | Jump from a latency spike to a slow trace                             |
-| Later    | Cost dashboards per service                             | Keep the infrastructure cost visible next to usage                    |
-| Later    | Real user monitoring once a frontend exists             | Measures the experience of the merchant, not only the API             |
+| Prioridade | Evolução                                                         | Justificativa                                                                   |
+| ---------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Agora      | Alertmanager com roteamento por severidade e links para runbooks | Os alertas chegam às pessoas; os runbooks estão em [operação](07-operations.md) |
+| Próximo    | Alertas de SLO por burn rate                                     | Alertar pela velocidade de consumo do error budget, não por limites fixos       |
+| Próximo    | Exemplars ligando picos de métricas a traces                     | Ir de um pico de latência direto a um trace lento                               |
+| Depois     | Dashboards de custo por serviço                                  | Manter o custo de infraestrutura visível ao lado do uso                         |
+| Depois     | Real user monitoring quando houver um frontend                   | Mede a experiência do comerciante, não só a da API                              |
 
-## Developer experience
+## Experiência de desenvolvimento
 
-| Priority | Evolution                                             | Rationale                                            |
-| -------- | ----------------------------------------------------- | ---------------------------------------------------- |
-| Next     | Web application for merchants (recording and reports) | The APIs are ready; a frontend completes the product |
-| Next     | Client SDKs generated from the OpenAPI documents      | Integrators consume typed clients                    |
-| Later    | Local development with hot reload inside containers   | Today services run with `tsx watch` outside Docker   |
+| Prioridade | Evolução                                                      | Justificativa                                         |
+| ---------- | ------------------------------------------------------------- | ----------------------------------------------------- |
+| Próximo    | Aplicação web para os comerciantes (lançamentos e relatórios) | As APIs estão prontas; um frontend completa o produto |
+| Próximo    | SDKs de cliente gerados a partir dos documentos OpenAPI       | Integradores consomem clientes tipados                |
+| Depois     | Desenvolvimento local com hot reload dentro dos containers    | Hoje os serviços rodam com `tsx watch` fora do Docker |

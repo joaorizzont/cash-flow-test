@@ -1,72 +1,72 @@
-# ADR-0008: Materialized daily balance with an idempotent consumer
+# ADR-0008: Saldo diário materializado com consumidor idempotente
 
-- **Status:** Accepted
-- **Date:** 2026-10-09
+- **Status:** Aceita
+- **Data:** 2026-10-09
 
-## Context
+## Contexto
 
-The daily balance must answer 50 req/s at peak with at most 5% loss. Computing the balance at query time (summing every entry of the day, and every previous day for the accumulated balance) would make reads cost proportional to history and couple the report to the ledger. Events arrive at least once, possibly duplicated, out of order, and possibly while the database is temporarily unavailable.
+O saldo diário precisa atender 50 req/s no pico com no máximo 5% de perda. Calcular o saldo no momento da consulta (somando todos os lançamentos do dia, e de todos os dias anteriores para o saldo acumulado) faria o custo da leitura crescer com o histórico e acoplaria o relatório ao ledger. Os eventos chegam pelo menos uma vez, possivelmente duplicados, fora de ordem e às vezes enquanto o banco está temporariamente indisponível.
 
-## Decision
+## Decisão
 
-Apply **CQRS with a materialized read model**:
+Aplicar **CQRS com modelo de leitura materializado**:
 
-- `daily_balances` keeps, per merchant and business date, `total_credits_cents`, `total_debits_cents`, `entry_count` and a generated `balance_cents`.
-- `applied_movements` is a **journal** of every consolidated event: primary key `event_id` and a unique `entry_id`.
+- `daily_balances` guarda, por comerciante e data de competência, `total_credits_cents`, `total_debits_cents`, `entry_count` e a coluna gerada `balance_cents`.
+- `applied_movements` é um **diário** de todos os eventos consolidados: chave primária `event_id` e `entry_id` único.
 
-For each event, in **one transaction**, the consumer:
+Para cada evento, em **uma única transação**, o consumidor:
 
-1. inserts the movement into the journal with `ON CONFLICT DO NOTHING`; if nothing was inserted, the event is a duplicate and processing stops;
-2. otherwise applies an **additive upsert** (`INSERT ... ON CONFLICT DO UPDATE SET total = total + delta`), which is atomic even with many consumers updating the same day;
-3. acknowledges the message only after commit.
+1. insere o movimento no diário com `ON CONFLICT DO NOTHING`; se nada foi inserido, o evento é duplicado e o processamento para;
+2. caso contrário, aplica um **UPSERT aditivo** (`INSERT ... ON CONFLICT DO UPDATE SET total = total + delta`), que é atômico mesmo com vários consumidores atualizando o mesmo dia;
+3. confirma a mensagem (`ack`) somente depois do commit.
 
-Deduplication by `entry_id` as well as `event_id` protects against the same entry arriving under two event ids, for example `v1` and `v2` published in parallel during a contract migration.
+A deduplicação por `entry_id`, além de `event_id`, protege contra o mesmo lançamento chegando com dois ids de evento, por exemplo `v1` e `v2` publicados em paralelo durante uma migração de contrato.
 
-A reversal arrives as a movement of the opposite type, so the balance of the day is corrected while the totals still show what really moved, like a bank statement.
+Um estorno chega como movimento do tipo oposto, então o saldo do dia é corrigido e os totais continuam mostrando o que realmente movimentou, como em um extrato bancário.
 
-**Failure handling** in the consumer:
+**Tratamento de falhas** no consumidor:
 
-| Situation                                    | Handling                                                                                            |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Not JSON or breaks the contract              | Straight to the DLQ with `x-dead-letter-reason`; retrying would not help                            |
-| Rejected by the domain                       | Same: DLQ immediately                                                                               |
-| Transient failure (database down)            | Republished to the retry queue with `x-attempt + 1`, returns after `CONSUMER_RETRY_DELAY_MS` (10 s) |
-| Attempts exhausted (`CONSUMER_MAX_ATTEMPTS`) | DLQ with the last error                                                                             |
+| Situação                                       | Tratamento                                                                                          |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Não é JSON ou quebra o contrato                | Direto para a DLQ com `x-dead-letter-reason`; repetir não ajudaria                                  |
+| Rejeitado pelo domínio                         | Mesmo tratamento: DLQ imediata                                                                      |
+| Falha transitória (banco fora do ar)           | Republicado na fila de espera com `x-attempt + 1`, volta depois de `CONSUMER_RETRY_DELAY_MS` (10 s) |
+| Tentativas esgotadas (`CONSUMER_MAX_ATTEMPTS`) | DLQ com o último erro                                                                               |
 
-Republishing to the retry queue or DLQ uses publisher confirms, and the original is acknowledged only after the confirm, so no message is lost in transit. Queues are **quorum queues** ([ADR-0006](0006-rabbitmq-message-broker.md)).
+A republicação na fila de espera ou na DLQ usa publisher confirms, e a mensagem original só recebe `ack` depois da confirmação, então nenhuma mensagem se perde no caminho. As filas são **quorum queues** ([ADR-0006](0006-rabbitmq-message-broker.md)).
 
-**Operations**: `rebuild-day` recomputes a day from the journal. It first locks the day row, then reads the journal, so it is safe to run with the consumer active (an integration test runs five rebuilds concurrently with 60 consolidations and checks the final balance against the journal). `redrive-dead-letters` moves DLQ messages back to the main queue after the cause is fixed.
+**Operação**: `rebuild-day` recalcula um dia a partir do diário. Ele primeiro trava a linha do dia e só depois lê o diário, então é seguro executá-lo com o consumidor ativo (um teste de integração roda cinco reconstruções concorrentes com 60 consolidações e confere o saldo final contra o diário). `redrive-dead-letters` devolve as mensagens da DLQ para a fila principal depois que a causa é corrigida.
 
-## Alternatives considered
+## Alternativas consideradas
 
-| Alternative                                       | Why it was not chosen                                                                |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Compute the balance at query time from the ledger | Synchronous coupling to the ledger and query cost growing with history               |
-| Read-modify-write of the balance                  | Lost updates under concurrency unless every update locks the row                     |
-| Deduplicate with a separate cache (Redis set)     | Not atomic with the balance update; a crash between both breaks exactly-once effects |
-| Rebuild from the ledger API                       | Runtime coupling to the ledger; the local journal is enough                          |
-| `nack` with immediate requeue                     | Hot loop while the database is down; delayed retry through a TTL queue avoids it     |
-| Process-level circuit breaker pausing consumption | More complex; the delayed retry already absorbs short outages                        |
+| Alternativa                                     | Por que não foi escolhida                                                                                      |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Calcular o saldo na consulta a partir do ledger | Acoplamento síncrono ao ledger e custo de consulta crescendo com o histórico                                   |
+| Ler, modificar e gravar o saldo                 | Atualizações perdidas sob concorrência, a menos que toda atualização trave a linha                             |
+| Deduplicar com um cache separado (set no Redis) | Não é atômico com a atualização do saldo; uma queda entre as duas operações quebra o efeito exatamente-uma-vez |
+| Reconstruir a partir da API do ledger           | Acoplamento em tempo de execução com o ledger; o diário local é suficiente                                     |
+| `nack` com reenfileiramento imediato            | Laço quente enquanto o banco está fora; a retentativa com atraso por uma fila com TTL evita isso               |
+| Circuit breaker no processo pausando o consumo  | Mais complexo; a retentativa com atraso já absorve quedas curtas                                               |
 
-## Consequences
+## Consequências
 
-**Positive**
+**Positivas**
 
-- Reads are primary-key lookups and range scans, which is what makes the peak trivial (50 req/s at p95 6.5 ms; 400 req/s with no errors on a single replica).
-- Exactly-once effect on the balance despite at-least-once delivery (tested with three parallel deliveries of the same event).
-- The read model can be rebuilt per day without the ledger.
+- As leituras são buscas por chave primária e varreduras de intervalo, o que torna o pico trivial (50 req/s com p95 de 6,5 ms; 400 req/s sem erros com uma única réplica).
+- Efeito exatamente-uma-vez no saldo apesar da entrega pelo menos uma vez (testado com três entregas paralelas do mesmo evento).
+- O modelo de leitura pode ser reconstruído por dia sem o ledger.
 
-**Negative / trade-offs**
+**Negativas / trade-offs**
 
-- Eventual consistency between recording and the report (p95 0.5 s measured).
-- An outage of the daily balance database longer than about 50 s (5 attempts × 10 s) sends messages to the DLQ; nothing is lost, but a redrive is needed. The alert `DeadLetterQueueNotEmpty` makes this visible; attempts and delay are configurable.
-- The journal grows with every entry; archiving older periods is a future evolution.
+- Consistência eventual entre o registro e o relatório (p95 medido de 0,5 s).
+- Uma queda do banco do consolidado maior que cerca de 50 s (5 tentativas × 10 s) envia mensagens para a DLQ; nada se perde, mas é preciso fazer o redrive. O alerta `DeadLetterQueueNotEmpty` torna isso visível; tentativas e atraso são configuráveis.
+- O diário cresce a cada lançamento; arquivar períodos antigos é uma evolução futura.
 
-## Evidence
+## Evidências
 
-- Use case: [consolidate-movement-service.ts](../../services/daily-balance/src/application/use-cases/consolidate-movement-service.ts)
-- Journal and additive upsert: [postgres-movement-journal.ts](../../services/daily-balance/src/adapters/outbound/postgres/postgres-movement-journal.ts), [postgres-daily-balance-repository.ts](../../services/daily-balance/src/adapters/outbound/postgres/postgres-daily-balance-repository.ts)
-- Outcome decision and DLQ rules: [ledger-message-handler.ts](../../services/daily-balance/src/adapters/inbound/messaging/ledger-message-handler.ts)
-- Retry and DLQ publishing: [rabbitmq-ledger-event-consumer.ts](../../services/daily-balance/src/adapters/inbound/messaging/rabbitmq-ledger-event-consumer.ts)
-- Rebuild and redrive: [rebuild-daily-balance-service.ts](../../services/daily-balance/src/application/use-cases/rebuild-daily-balance-service.ts), [rabbitmq-dead-letter-redriver.ts](../../services/daily-balance/src/adapters/inbound/messaging/rabbitmq-dead-letter-redriver.ts)
-- Domain aggregate: [daily-balance.ts](../../services/daily-balance/src/domain/balance/daily-balance.ts)
+- Caso de uso: [consolidate-movement-service.ts](../../services/daily-balance/src/application/use-cases/consolidate-movement-service.ts)
+- Diário e UPSERT aditivo: [postgres-movement-journal.ts](../../services/daily-balance/src/adapters/outbound/postgres/postgres-movement-journal.ts), [postgres-daily-balance-repository.ts](../../services/daily-balance/src/adapters/outbound/postgres/postgres-daily-balance-repository.ts)
+- Decisão do resultado e regras da DLQ: [ledger-message-handler.ts](../../services/daily-balance/src/adapters/inbound/messaging/ledger-message-handler.ts)
+- Publicação na fila de espera e na DLQ: [rabbitmq-ledger-event-consumer.ts](../../services/daily-balance/src/adapters/inbound/messaging/rabbitmq-ledger-event-consumer.ts)
+- Reconstrução e redrive: [rebuild-daily-balance-service.ts](../../services/daily-balance/src/application/use-cases/rebuild-daily-balance-service.ts), [rabbitmq-dead-letter-redriver.ts](../../services/daily-balance/src/adapters/inbound/messaging/rabbitmq-dead-letter-redriver.ts)
+- Agregado de domínio: [daily-balance.ts](../../services/daily-balance/src/domain/balance/daily-balance.ts)

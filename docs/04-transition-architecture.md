@@ -1,201 +1,201 @@
-# Transition Architecture
+# Arquitetura de Transição
 
-The challenge asks for a transition architecture "if necessary, considering a legacy migration". No legacy system was described, so this document makes the assumption explicit and plans a migration that keeps the merchant operating at every step.
+O desafio pede uma arquitetura de transição "se necessária, considerando uma migração de legado". Nenhum sistema legado foi descrito, então este documento explicita a premissa adotada e planeja uma migração que mantém o comerciante operando em todas as etapas.
 
-> **If there is no legacy (greenfield),** the [target architecture](03-target-architecture.md) can be deployed directly. In that case, sections 6 to 8 of this document (cohort rollout, rollback and exit criteria) are the go-live plan.
+> **Se não houver legado (greenfield),** a [arquitetura alvo](03-target-architecture.md) pode ser implantada diretamente. Nesse caso, as seções 5 a 8 deste documento (entrada por coortes, rollback e critérios de saída) formam o plano de entrada em produção.
 
-## 1. Assumed legacy
+## 1. Legado assumido
 
-| Aspect        | Assumption                                                                                                                                                  |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Application   | A monolithic back-office application (desktop or web ERP) used by the merchant to record cash entries                                                       |
-| Data          | A single relational database with an entries table: amount as decimal, a date/time column in server local time, a type or signed amount                     |
-| Daily balance | Computed by a nightly batch job or by `SUM` queries at report time                                                                                          |
-| Pain points   | Reports slow down the whole system at peak; a failure in reporting can take down entry recording; no API for other channels; history can be edited in place |
-| Constraint    | Merchants depend on it every day: no downtime window longer than a few minutes, and no change to how they work until the new screens are ready              |
+| Aspecto      | Premissa                                                                                                                                                                                  |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Aplicação    | Uma aplicação de back-office monolítica (ERP desktop ou web) usada pelo comerciante para registrar os lançamentos de caixa                                                                |
+| Dados        | Um único banco relacional com uma tabela de lançamentos: valor em decimal, uma coluna de data/hora no horário local do servidor, um tipo ou um valor com sinal                            |
+| Saldo diário | Calculado por um job batch noturno ou por consultas `SUM` no momento do relatório                                                                                                         |
+| Problemas    | Relatórios deixam o sistema inteiro lento no pico; uma falha nos relatórios pode derrubar o registro de lançamentos; não há API para outros canais; o histórico pode ser editado no lugar |
+| Restrição    | Os comerciantes dependem dele todos os dias: nenhuma janela de indisponibilidade maior que alguns minutos, e nenhuma mudança na forma de trabalhar até as novas telas estarem prontas     |
 
-These pain points are exactly what the target addresses: separate write and read sides ([ADR 0002](adr/0002-event-driven-microservices.md)), an immutable ledger and a materialized daily balance ([ADR 0008](adr/0008-materialized-daily-balance.md)).
+Esses problemas são exatamente o que o alvo resolve: lados de escrita e de leitura separados ([ADR 0002](adr/0002-event-driven-microservices.md)), um ledger imutável e um saldo diário materializado ([ADR 0008](adr/0008-materialized-daily-balance.md)).
 
-## 2. Strategy
+## 2. Estratégia
 
-- **Strangler Fig:** the new services take over one capability at a time, behind a routing layer, while the legacy keeps running.
-- **Anti-corruption layer:** legacy data is never read by the new domain directly. An adapter translates it into the same CloudEvents contract used by the ledger ([ADR 0007](adr/0007-cloudevents-shared-contracts.md)), so the daily balance does not know where an event came from.
-- **Read side first:** the daily balance is migrated before the ledger. It carries no write risk and immediately relieves the legacy from heavy reports.
-- **Per-merchant cohorts:** the write path moves merchant by merchant, with a rollback at every step.
-- **No big bang:** every state below is stable and can last as long as needed.
+- **Strangler Fig:** os novos serviços assumem uma capacidade por vez, atrás de uma camada de roteamento, enquanto o legado continua rodando.
+- **Camada anticorrupção:** o novo domínio nunca lê os dados do legado diretamente. Um adapter os traduz para o mesmo contrato CloudEvents usado pelo ledger ([ADR 0007](adr/0007-cloudevents-shared-contracts.md)), de modo que o consolidado não sabe de onde veio um evento.
+- **Lado de leitura primeiro:** o consolidado é migrado antes do ledger. Ele não traz risco de escrita e alivia o legado dos relatórios pesados imediatamente.
+- **Coortes por comerciante:** o caminho de escrita migra comerciante por comerciante, com rollback possível em cada etapa.
+- **Sem big bang:** cada estado abaixo é estável e pode durar o tempo que for necessário.
 
 ```mermaid
 flowchart LR
-  T0["T0<br/>legacy only"] --> T1["T1<br/>CDC feeds the<br/>new daily balance"]
-  T1 --> T2["T2<br/>new ledger for<br/>merchant cohorts"]
-  T2 --> T3["T3<br/>all merchants migrated,<br/>legacy read-only"]
-  T3 --> T4["T4<br/>legacy decommissioned"]
+  T0["T0<br/>apenas o legado"] --> T1["T1<br/>CDC alimenta o<br/>novo consolidado"]
+  T1 --> T2["T2<br/>novo ledger para<br/>coortes de comerciantes"]
+  T2 --> T3["T3<br/>todos os comerciantes migrados,<br/>legado somente leitura"]
+  T3 --> T4["T4<br/>legado desligado"]
 ```
 
-## 3. Transition states
+## 3. Estados de transição
 
-### T0: legacy only (current state)
+### T0: apenas o legado (estado atual)
 
 ```mermaid
 flowchart LR
-  M(["Merchant"]) --> LA["Legacy application"]
-  LA --> LDB[("Legacy database<br/>entries")]
-  B["Nightly batch<br/>or SUM at report time"] --> LDB
+  M(["Comerciante"]) --> LA["Aplicação legada"]
+  LA --> LDB[("Banco legado<br/>lançamentos")]
+  B["Batch noturno<br/>ou SUM no relatório"] --> LDB
 ```
 
-Preparation work in T0, with no impact on the merchant: provision the target infrastructure, Keycloak with the merchants' users, observability, and map legacy fields to the event contract (type, amount in cents, business date, time zone).
+Trabalho de preparação em T0, sem impacto para o comerciante: provisionar a infraestrutura alvo, o Keycloak com os usuários dos comerciantes e a observabilidade, e mapear os campos do legado para o contrato de eventos (tipo, valor em centavos, data de competência, fuso).
 
-### T1: change data capture feeds the new daily balance
+### T1: change data capture alimenta o novo consolidado
 
 ```mermaid
 flowchart LR
-  M(["Merchant"]) --> LA["Legacy application"]
-  LA --> LDB[("Legacy database")]
+  M(["Comerciante"]) --> LA["Aplicação legada"]
+  LA --> LDB[("Banco legado")]
   LDB -->|"WAL / binlog"| CDC["Debezium<br/>(CDC)"]
-  CDC --> ACL["Legacy anti-corruption adapter<br/>translates rows to<br/>cashflow.ledger.entry.recorded.v1"]
+  CDC --> ACL["Adapter anticorrupção do legado<br/>traduz linhas para<br/>cashflow.ledger.entry.recorded.v1"]
   ACL --> X{{"cash-flow.ledger.events"}}
   X --> C["daily-balance-consumer"]
   C --> DDB[("daily_balance")]
-  M -->|"new reports"| API["daily-balance API"]
+  M -->|"novos relatórios"| API["API daily-balance"]
   API --> DDB
-  REC["Reconciliation job"] --> LDB
+  REC["Job de conciliação"] --> LDB
   REC --> DDB
 ```
 
-| Item                      | Detail                                                                                                                                                                                            |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Source of truth           | Still the legacy                                                                                                                                                                                  |
-| What changes              | Every insert in the legacy entries table is captured by Debezium from the transaction log and translated into a CloudEvent with the legacy row id as `entryId`                                    |
-| Anti-corruption adapter   | Converts decimals to cents, signed amounts to `CREDIT`/`DEBIT`, server local time to a business date in the merchant's IANA time zone, and builds a deterministic event id from the legacy row id |
-| Corrections in the legacy | An update or delete of a legacy row is translated into a reversal event plus, for an update, a new recorded event: the new side remains immutable                                                 |
-| Reconciliation            | A daily job compares, per merchant and business date, the legacy totals with `daily_balances`; any difference raises an alert and is investigated before moving on                                |
-| What merchants see        | Optionally, the new balance report, offered first to internal users and a pilot group                                                                                                             |
-| Risk                      | Low: the legacy is untouched; the new side can be dropped and rebuilt at any time                                                                                                                 |
+| Item                       | Detalhe                                                                                                                                                                                                                           |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fonte da verdade           | Continua sendo o legado                                                                                                                                                                                                           |
+| O que muda                 | Cada inserção na tabela de lançamentos do legado é capturada pelo Debezium a partir do log de transações e traduzida em um CloudEvent, com o id da linha do legado como `entryId`                                                 |
+| Adapter anticorrupção      | Converte decimais em centavos, valores com sinal em `CREDIT`/`DEBIT`, o horário local do servidor em uma data de competência no fuso IANA do comerciante, e gera um id de evento determinístico a partir do id da linha do legado |
+| Correções no legado        | Um update ou delete de uma linha do legado é traduzido em um evento de estorno e, no caso de update, em um novo evento de registro: o lado novo continua imutável                                                                 |
+| Conciliação                | Um job diário compara, por comerciante e data de competência, os totais do legado com `daily_balances`; qualquer diferença gera um alerta e é investigada antes de seguir                                                         |
+| O que os comerciantes veem | Opcionalmente, o novo relatório de saldo, oferecido primeiro a usuários internos e a um grupo piloto                                                                                                                              |
+| Risco                      | Baixo: o legado não é alterado; o lado novo pode ser descartado e reconstruído a qualquer momento                                                                                                                                 |
 
-### T2: the new ledger becomes the write path for merchant cohorts
+### T2: o novo ledger passa a ser o caminho de escrita para coortes de comerciantes
 
 ```mermaid
 flowchart LR
-  M1(["Migrated merchants"]) --> GW["API gateway<br/>routing by merchant cohort<br/>(feature flag)"]
-  M2(["Other merchants"]) --> GW
-  GW -->|"cohort = new"| L["ledger API"]
-  GW -->|"cohort = legacy"| LA["Legacy application"]
-  L --> LDBN[("ledger DB + outbox")]
+  M1(["Comerciantes migrados"]) --> GW["API gateway<br/>roteamento por coorte de comerciantes<br/>(feature flag)"]
+  M2(["Demais comerciantes"]) --> GW
+  GW -->|"coorte = novo"| L["API ledger"]
+  GW -->|"coorte = legado"| LA["Aplicação legada"]
+  L --> LDBN[("banco do ledger + outbox")]
   LDBN --> R["outbox relay"] --> X{{"cash-flow.ledger.events"}}
-  LA --> LDB[("Legacy database")]
+  LA --> LDB[("Banco legado")]
   LDB --> CDC["Debezium + adapter"] --> X
   X --> C["daily-balance-consumer"] --> DDB[("daily_balance")]
-  X --> SYNC["Legacy sync adapter<br/>writes migrated merchants'<br/>entries back to the legacy"]
+  X --> SYNC["Adapter de sincronização com o legado<br/>grava de volta no legado os<br/>lançamentos dos comerciantes migrados"]
   SYNC --> LDB
 ```
 
-| Item                    | Detail                                                                                                                                                                                    |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Source of truth         | The new ledger for migrated merchants; the legacy for the others                                                                                                                          |
-| Routing                 | The gateway decides per `merchant_id` (from the token) using a feature flag; the merchant's client or UI calls the same entry point                                                       |
-| Reverse synchronization | While legacy reports or downstream integrations still read the legacy database, a sync adapter consumes ledger events and writes them to the legacy, marked with their origin             |
-| Loop prevention         | Rows written by the sync adapter carry an origin marker and are ignored by the CDC adapter, so an entry is never published twice; even if it were, the consumer deduplicates by `entryId` |
-| Dual run                | During the first weeks of each cohort, the reconciliation job compares the new ledger, the legacy copy and the daily balance                                                              |
-| Risk                    | Medium: limited to the cohort; rollback is a flag change                                                                                                                                  |
+| Item                  | Detalhe                                                                                                                                                                                                                    |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fonte da verdade      | O novo ledger para os comerciantes migrados; o legado para os demais                                                                                                                                                       |
+| Roteamento            | O gateway decide por `merchant_id` (vindo do token) usando uma feature flag; o cliente ou a interface do comerciante chama o mesmo ponto de entrada                                                                        |
+| Sincronização reversa | Enquanto relatórios ou integrações a jusante ainda lerem o banco legado, um adapter de sincronização consome os eventos do ledger e os grava no legado, marcados com a origem                                              |
+| Prevenção de loop     | As linhas gravadas pelo adapter de sincronização trazem um marcador de origem e são ignoradas pelo adapter de CDC, então um lançamento nunca é publicado duas vezes; mesmo que fosse, o consumidor deduplica por `entryId` |
+| Execução em paralelo  | Nas primeiras semanas de cada coorte, o job de conciliação compara o novo ledger, a cópia no legado e o consolidado                                                                                                        |
+| Risco                 | Médio: limitado à coorte; o rollback é uma mudança de flag                                                                                                                                                                 |
 
-### T3: all merchants migrated, legacy read-only
+### T3: todos os comerciantes migrados, legado somente leitura
 
 ```mermaid
 flowchart LR
-  M(["All merchants"]) --> GW["API gateway"] --> L["ledger API"]
-  L --> LDBN[("ledger DB + outbox")]
+  M(["Todos os comerciantes"]) --> GW["API gateway"] --> L["API ledger"]
+  L --> LDBN[("banco do ledger + outbox")]
   LDBN --> R["outbox relay"] --> X{{"cash-flow.ledger.events"}}
   X --> C["daily-balance-consumer"] --> DDB[("daily_balance")]
-  IMP["Historical import<br/>(batch, idempotent)"] --> L
-  LDB[("Legacy database<br/>read-only")] --> IMP
+  IMP["Importação histórica<br/>(batch, idempotente)"] --> L
+  LDB[("Banco legado<br/>somente leitura")] --> IMP
 ```
 
-All writes go to the new ledger. The legacy becomes read-only for consultation and audit. History is imported (section 4) so that the new ledger and the daily balance hold the full past.
+Todas as escritas vão para o novo ledger. O legado passa a ser somente leitura, para consulta e auditoria. O histórico é importado (seção 4) para que o novo ledger e o consolidado contenham todo o passado.
 
-### T4: legacy decommissioned
+### T4: legado desligado
 
 ```mermaid
 flowchart LR
-  M(["Merchants"]) --> GW["API gateway"]
-  GW --> L["ledger API"]
-  GW --> API["daily-balance API"]
-  L --> LDBN[("ledger DB")]
-  LDBN --> X{{"events"}} --> C["consumer"] --> DDB[("daily_balance")]
+  M(["Comerciantes"]) --> GW["API gateway"]
+  GW --> L["API ledger"]
+  GW --> API["API daily-balance"]
+  L --> LDBN[("banco do ledger")]
+  LDBN --> X{{"eventos"}} --> C["consumidor"] --> DDB[("daily_balance")]
   API --> DDB
-  ARCH[("Legacy database snapshot<br/>archived for audit")]
+  ARCH[("Snapshot do banco legado<br/>arquivado para auditoria")]
 ```
 
-Debezium, the anti-corruption adapter, the sync adapter and the routing flag are removed. A final snapshot of the legacy database is archived (encrypted, read-only) for the legal retention period.
+O Debezium, o adapter anticorrupção, o adapter de sincronização e a flag de roteamento são removidos. Um snapshot final do banco legado é arquivado (criptografado, somente leitura) pelo prazo legal de retenção.
 
-## 4. Historical data migration
+## 4. Migração dos dados históricos
 
-| Step | Action                                                                                                                                                                                                                               |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1    | Extract legacy entries per merchant and month, in order                                                                                                                                                                              |
-| 2    | Translate them with the same anti-corruption rules used by the CDC adapter (cents, type, business date, time zone)                                                                                                                   |
-| 3    | Import through a dedicated batch endpoint or command of the ledger that accepts past business dates without the 30-day backdating rule, with an `Idempotency-Key` derived from the legacy row id: a re-run never duplicates an entry |
-| 4    | The ledger writes each entry and its event in the same transaction, preserving the original business date, so the outbox publishes history like any other event                                                                      |
-| 5    | The consumer consolidates history into `daily_balances`. Its deduplication by `entryId` makes it safe even for entries that already arrived through CDC in T1                                                                        |
-| 6    | If a day needs to be recomputed, the existing `rebuild-day` command recalculates it from the journal                                                                                                                                 |
-| 7    | Reconcile every merchant and business date (counts and totals) between legacy and new side before declaring the merchant migrated                                                                                                    |
+| Passo | Ação                                                                                                                                                                                                                                                       |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | Extrair os lançamentos do legado por comerciante e por mês, em ordem                                                                                                                                                                                       |
+| 2     | Traduzi-los com as mesmas regras anticorrupção usadas pelo adapter de CDC (centavos, tipo, data de competência, fuso)                                                                                                                                      |
+| 3     | Importar por um endpoint ou comando batch dedicado do ledger, que aceite datas de competência passadas sem a regra de 30 dias de retroatividade, com um `Idempotency-Key` derivado do id da linha do legado: uma nova execução nunca duplica um lançamento |
+| 4     | O ledger grava cada lançamento e seu evento na mesma transação, preservando a data de competência original, então o outbox publica o histórico como qualquer outro evento                                                                                  |
+| 5     | O consumidor consolida o histórico em `daily_balances`. A deduplicação por `entryId` garante a segurança mesmo para lançamentos que já chegaram por CDC em T1                                                                                              |
+| 6     | Se for preciso recalcular um dia, o comando `rebuild-day` já existente faz isso a partir do diário                                                                                                                                                         |
+| 7     | Conciliar cada comerciante e data de competência (quantidades e totais) entre o legado e o lado novo antes de declarar o comerciante migrado                                                                                                               |
 
-Throughput is controlled by the batch size and the relay; the import runs at night or throttled, so it does not compete with live traffic. The outbox lag and consumer backlog metrics ([observability](../README.md#observabilidade)) show progress.
+A vazão é controlada pelo tamanho do lote e pelo relay; a importação roda à noite ou com limitação de ritmo, para não competir com o tráfego real. As métricas de atraso do outbox e de backlog do consumidor ([observabilidade](../README.md#observabilidade)) mostram o progresso.
 
-### Cutover checklist per cohort
+### Checklist de virada por coorte
 
-- [ ] History imported and reconciled for every merchant in the cohort (zero differences, or differences explained and signed off)
-- [ ] Users and `merchant_id` attributes created in Keycloak; operators and viewers have the right roles
-- [ ] Merchants informed of the change window and of the new report screens
-- [ ] Dashboards and alerts green for the previous cohort for at least one full week
-- [ ] Rollback rehearsed in staging: flag back to legacy, sync adapter catching up
-- [ ] Flag switched; first entries of each merchant checked end to end with their `x-trace-id`
-- [ ] Reconciliation job scheduled daily for the cohort during the dual-run period
+- [ ] Histórico importado e conciliado para todos os comerciantes da coorte (zero diferenças, ou diferenças explicadas e aprovadas)
+- [ ] Usuários e atributos `merchant_id` criados no Keycloak; operadores e analistas com os papéis corretos
+- [ ] Comerciantes informados sobre a janela de mudança e sobre as novas telas de relatório
+- [ ] Dashboards e alertas sem problemas para a coorte anterior por pelo menos uma semana completa
+- [ ] Rollback ensaiado em staging: flag de volta para o legado, adapter de sincronização em dia
+- [ ] Flag trocada; primeiros lançamentos de cada comerciante conferidos de ponta a ponta pelo `x-trace-id`
+- [ ] Job de conciliação agendado diariamente para a coorte durante o período de execução em paralelo
 
-## 5. Routing and rollout
+## 5. Roteamento e entrada em produção
 
-| Wave     | Merchants       | Minimum duration | Moves on when                                                                  |
-| -------- | --------------- | ---------------- | ------------------------------------------------------------------------------ |
-| Pilot    | Internal and 1% | 2 weeks          | Zero reconciliation differences, no critical alert, merchant feedback positive |
-| Early    | 10%             | 2 weeks          | Same, plus error budget within objectives                                      |
-| Majority | 50%             | 1 week           | Same                                                                           |
-| All      | 100%            | —                | Legacy write path idle for one week, then T3                                   |
+| Onda    | Comerciantes  | Duração mínima | Avança quando                                                                             |
+| ------- | ------------- | -------------- | ----------------------------------------------------------------------------------------- |
+| Piloto  | Internos e 1% | 2 semanas      | Zero diferenças na conciliação, nenhum alerta crítico, feedback positivo dos comerciantes |
+| Inicial | 10%           | 2 semanas      | O mesmo, mais o orçamento de erro dentro dos objetivos                                    |
+| Maioria | 50%           | 1 semana       | O mesmo                                                                                   |
+| Todos   | 100%          | —              | Caminho de escrita do legado sem uso por uma semana; então T3                             |
 
-The flag is evaluated per `merchant_id`, so a single merchant can be moved back without affecting the others.
+A flag é avaliada por `merchant_id`, então um único comerciante pode voltar para o legado sem afetar os demais.
 
-## 6. Rollback per state
+## 6. Rollback por estado
 
-| State | How to roll back                                                                         | Data impact                                                                                                                            |
-| ----- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| T1    | Stop Debezium and the adapter; merchants keep using legacy reports                       | None: the legacy was never changed. The new daily balance can be truncated and rebuilt                                                 |
-| T2    | Switch the cohort's flag back to legacy                                                  | Entries recorded in the new ledger are already in the legacy through the sync adapter; wait for its lag to reach zero before switching |
-| T3    | Re-enable legacy writes and route back by flag; keep the sync adapter running until then | Requires the sync adapter to still be in place, which is why it is only removed in T4                                                  |
-| T4    | Not reversible by design; reached only after T3 has been stable for the agreed period    | Legacy snapshot is archived                                                                                                            |
+| Estado | Como fazer o rollback                                                                                              | Impacto nos dados                                                                                                                            |
+| ------ | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| T1     | Parar o Debezium e o adapter; os comerciantes continuam usando os relatórios do legado                             | Nenhum: o legado nunca foi alterado. O novo consolidado pode ser truncado e reconstruído                                                     |
+| T2     | Voltar a flag da coorte para o legado                                                                              | Os lançamentos gravados no novo ledger já estão no legado pelo adapter de sincronização; esperar o atraso dele chegar a zero antes de trocar |
+| T3     | Reabilitar as escritas no legado e voltar o roteamento pela flag; manter o adapter de sincronização rodando até lá | Exige que o adapter de sincronização ainda exista, e por isso ele só é removido em T4                                                        |
+| T4     | Irreversível por definição; só é alcançado depois que T3 ficou estável pelo período combinado                      | O snapshot do legado é arquivado                                                                                                             |
 
-## 7. Risks and mitigations
+## 7. Riscos e mitigações
 
-| Risk                                           | Mitigation                                                                                                                                                                                                                 |
-| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Divergence between legacy and new totals       | Daily reconciliation per merchant and business date with alerts; a cohort does not advance while differences are open                                                                                                      |
-| Double counting (CDC, import and sync overlap) | Deterministic `entryId` from the legacy row id; the consumer deduplicates by event id and by entry id in the same transaction as the balance update                                                                        |
-| Time zones in legacy dates                     | Legacy timestamps are interpreted in the server's time zone and converted to the business date in the point of sale's IANA time zone by the adapter, with tests for boundary cases (midnight, Fernando de Noronha, Manaus) |
-| Legacy edits history in place                  | Updates and deletes become reversal events; the new ledger stays immutable and auditable                                                                                                                                   |
-| Load on the legacy database from CDC           | Debezium reads the transaction log, not the tables; the initial snapshot runs at night or from a replica                                                                                                                   |
-| Downtime during cutover                        | None required: cutover is a flag change per merchant                                                                                                                                                                       |
-| Performance of the new side under real traffic | Load and resilience tests before each wave; autoscaling; the measured capacity is 8x the required peak on a single replica                                                                                                 |
-| Team unfamiliar with event-driven systems      | Runbooks ([07-operations.md](07-operations.md)), dashboards, end-to-end traces and pairing during the pilot                                                                                                                |
-| Incomplete mapping of legacy entry types       | Unknown types are sent to the DLQ with the reason, not silently dropped; the mapping is extended and the messages redriven                                                                                                 |
+| Risco                                                            | Mitigação                                                                                                                                                                                                                         |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Divergência entre os totais do legado e do lado novo             | Conciliação diária por comerciante e data de competência, com alertas; uma coorte não avança enquanto houver diferenças em aberto                                                                                                 |
+| Contagem dupla (sobreposição de CDC, importação e sincronização) | `entryId` determinístico a partir do id da linha do legado; o consumidor deduplica por id do evento e por id do lançamento na mesma transação da atualização do saldo                                                             |
+| Fusos horários nas datas do legado                               | Os horários do legado são interpretados no fuso do servidor e convertidos pelo adapter para a data de competência no fuso IANA do ponto de venda, com testes para os casos de fronteira (meia-noite, Fernando de Noronha, Manaus) |
+| Legado que edita o histórico no lugar                            | Updates e deletes viram eventos de estorno; o novo ledger continua imutável e auditável                                                                                                                                           |
+| Carga do CDC sobre o banco legado                                | O Debezium lê o log de transações, não as tabelas; o snapshot inicial roda à noite ou a partir de uma réplica                                                                                                                     |
+| Indisponibilidade durante a virada                               | Nenhuma necessária: a virada é uma mudança de flag por comerciante                                                                                                                                                                |
+| Desempenho do lado novo sob tráfego real                         | Testes de carga e de resiliência antes de cada onda; autoscaling; a capacidade medida é 8 vezes o pico exigido com uma única réplica                                                                                              |
+| Time pouco familiarizado com sistemas orientados a eventos       | Runbooks ([07-operations.md](07-operations.md)), dashboards, traces ponta a ponta e pareamento durante o piloto                                                                                                                   |
+| Mapeamento incompleto dos tipos de lançamento do legado          | Tipos desconhecidos vão para a DLQ com o motivo, em vez de serem descartados silenciosamente; o mapeamento é estendido e as mensagens passam por redrive                                                                          |
 
-## 8. Timeline estimate
+## 8. Estimativa de cronograma
 
-Indicative, for one squad (4 to 6 people) and an assumed legacy of moderate complexity.
+Indicativa, para um squad (4 a 6 pessoas) e um legado assumido de complexidade moderada.
 
-| Phase                | Weeks     | Main deliverables                                                                          | Exit criteria                                                                               |
-| -------------------- | --------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| T0 preparation       | 3–4       | Infrastructure as code, Keycloak users, observability, field mapping, adapters' test suite | Target environment passing the load and resilience tests in staging                         |
-| T1 CDC and read side | 4–6       | Debezium, anti-corruption adapter, reconciliation job, new reports for pilot users         | 2 consecutive weeks with zero reconciliation differences                                    |
-| T2 cohorts           | 6–8       | Gateway routing, feature flag, sync adapter, waves 1% → 10% → 50% → 100%                   | All merchants on the new ledger, error budget respected, no open reconciliation differences |
-| T3 legacy read-only  | 2–4       | Historical import, full reconciliation, legacy writes disabled                             | History reconciled for every merchant; one month without legacy writes                      |
-| T4 decommission      | 1–2       | Remove adapters and flags, archive legacy snapshot                                         | Legacy shut down, archive verified                                                          |
-| **Total**            | **16–24** |                                                                                            |                                                                                             |
+| Fase                      | Semanas   | Principais entregas                                                                                                   | Critérios de saída                                                                                             |
+| ------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| T0 preparação             | 3–4       | Infraestrutura como código, usuários no Keycloak, observabilidade, mapeamento de campos, suíte de testes dos adapters | Ambiente alvo passando nos testes de carga e de resiliência em staging                                         |
+| T1 CDC e lado de leitura  | 4–6       | Debezium, adapter anticorrupção, job de conciliação, novos relatórios para usuários piloto                            | 2 semanas seguidas com zero diferenças na conciliação                                                          |
+| T2 coortes                | 6–8       | Roteamento no gateway, feature flag, adapter de sincronização, ondas 1% → 10% → 50% → 100%                            | Todos os comerciantes no novo ledger, orçamento de erro respeitado, nenhuma diferença de conciliação em aberto |
+| T3 legado somente leitura | 2–4       | Importação histórica, conciliação completa, escritas no legado desabilitadas                                          | Histórico conciliado para todos os comerciantes; um mês sem escritas no legado                                 |
+| T4 desligamento           | 1–2       | Remoção dos adapters e das flags, arquivamento do snapshot do legado                                                  | Legado desligado, arquivo verificado                                                                           |
+| **Total**                 | **16–24** |                                                                                                                       |                                                                                                                |
 
-The target architecture already contains the building blocks this plan relies on: the event contract with versioning, idempotent consumption by entry id, the `rebuild-day` and `redrive-dead-letters` commands, per-merchant identity in the token and the observability needed to compare both worlds. See also [future evolutions](08-future-evolutions.md) and the [cost estimate](05-cost-estimate.md), which includes the temporary cost of running both systems in parallel.
+A arquitetura alvo já contém os blocos dos quais este plano depende: o contrato de eventos com versionamento, o consumo idempotente por id do lançamento, os comandos `rebuild-day` e `redrive-dead-letters`, a identidade por comerciante no token e a observabilidade necessária para comparar os dois mundos. Veja também as [evoluções futuras](08-future-evolutions.md) e a [estimativa de custos](05-cost-estimate.md), que inclui o custo temporário de manter os dois sistemas rodando em paralelo.

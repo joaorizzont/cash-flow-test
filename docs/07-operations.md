@@ -1,202 +1,202 @@
-# Operations, SLOs and runbooks
+# Operação, SLOs e runbooks
 
-This document complements the README sections "Observabilidade", "Resiliência" and "Testes de carga e resiliência". It defines the service level objectives, a runbook for each alert, backup and disaster recovery, and day-to-day operating practices.
+Este documento complementa as seções "Observabilidade", "Resiliência" e "Testes de carga e resiliência" do README. Ele define os objetivos de nível de serviço, um runbook para cada alerta, backup e recuperação de desastres, e as práticas de operação do dia a dia.
 
-## Service level indicators and objectives
+## Indicadores e objetivos de nível de serviço
 
-| SLO                           | SLI and measurement                                                                                                                                                                                                                                    | Target                                   | Error budget (30 days)                    |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------- | ----------------------------------------- |
-| Ledger availability           | Share of ledger requests without `5xx`: `1 - sum(rate(http_server_request_duration_seconds_count{job="cash-flow/ledger",http_response_status_code=~"5.."}[30d])) / sum(rate(http_server_request_duration_seconds_count{job="cash-flow/ledger"}[30d]))` | 99.9%                                    | 0.1% of requests (~43 min of full outage) |
-| Daily balance success at peak | Share of report requests without `5xx` or `429`, same formula with `job="cash-flow/daily-balance"` and `http_response_status_code=~"5..\|429"`                                                                                                         | 95% (requirement); 99.5% internal target | 0.5% of requests                          |
-| Daily balance latency         | `histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job="cash-flow/daily-balance"}[5m])))`                                                                                                                         | p95 < 500 ms                             | —                                         |
-| Consolidation freshness       | `histogram_quantile(0.95, sum by (le) (rate(cashflow_consolidation_lag_seconds_bucket[5m])))`                                                                                                                                                          | p95 < 30 s (measured: 0.5 s)             | —                                         |
-| Outbox freshness              | `max(cashflow_outbox_lag_seconds)`                                                                                                                                                                                                                     | < 60 s                                   | —                                         |
-| No lost entries               | `rabbitmq_detailed_queue_messages{queue="daily-balance.ledger-events.dlq"}` and the journal matching the ledger                                                                                                                                        | 0 messages in the DLQ                    | none                                      |
+| SLO                            | SLI e forma de medir                                                                                                                                                                                                                                         | Meta                                   | Error budget (30 dias)                        |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------- | --------------------------------------------- |
+| Disponibilidade do ledger      | Proporção de requisições ao ledger sem `5xx`: `1 - sum(rate(http_server_request_duration_seconds_count{job="cash-flow/ledger",http_response_status_code=~"5.."}[30d])) / sum(rate(http_server_request_duration_seconds_count{job="cash-flow/ledger"}[30d]))` | 99,9%                                  | 0,1% das requisições (~43 min de queda total) |
+| Sucesso do consolidado no pico | Proporção de requisições ao relatório sem `5xx` ou `429`, mesma fórmula com `job="cash-flow/daily-balance"` e `http_response_status_code=~"5..\|429"`                                                                                                        | 95% (requisito); 99,5% de meta interna | 0,5% das requisições                          |
+| Latência do consolidado        | `histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job="cash-flow/daily-balance"}[5m])))`                                                                                                                               | p95 < 500 ms                           | —                                             |
+| Atualidade da consolidação     | `histogram_quantile(0.95, sum by (le) (rate(cashflow_consolidation_lag_seconds_bucket[5m])))`                                                                                                                                                                | p95 < 30 s (medido: 0,5 s)             | —                                             |
+| Atualidade do outbox           | `max(cashflow_outbox_lag_seconds)`                                                                                                                                                                                                                           | < 60 s                                 | —                                             |
+| Nenhum lançamento perdido      | `rabbitmq_detailed_queue_messages{queue="daily-balance.ledger-events.dlq"}` e o diário de movimentos batendo com o ledger                                                                                                                                    | 0 mensagens na DLQ                     | nenhum                                        |
 
-The internal target for the daily balance is stricter than the requirement so that the requirement is never the first line breached. Measured locally: 0% failures at 50 req/s, including 30-second outages of Redis and of the daily balance database.
+A meta interna do consolidado é mais rígida que o requisito para que o requisito nunca seja o primeiro limite rompido. Medição local: 0% de falhas a 50 req/s, inclusive com quedas de 30 segundos do Redis e do banco do consolidado.
 
-Burn-rate based alerting on these SLOs is a planned evolution; today alerts use fixed thresholds ([alerts.yml](../infra/prometheus/alerts.yml)).
+Alertas baseados em burn rate sobre esses SLOs são uma evolução planejada; hoje os alertas usam limites fixos ([alerts.yml](../infra/prometheus/alerts.yml)).
 
 ## Runbooks
 
-General tools:
+Ferramentas gerais:
 
-| Tool                        | Local address                                                                               |
-| --------------------------- | ------------------------------------------------------------------------------------------- |
-| Grafana dashboard Cash Flow | http://localhost:3000                                                                       |
-| Prometheus alerts           | http://localhost:9090/alerts                                                                |
-| RabbitMQ management         | http://localhost:15672                                                                      |
-| Traces and logs             | Grafana → Explore → Tempo (by `x-trace-id`) or Loki                                         |
-| Service state               | `docker compose ps`, `curl localhost:3001/health/ready`, `curl localhost:3002/health/ready` |
+| Ferramenta                     | Endereço local                                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------------------- |
+| Dashboard Cash Flow no Grafana | http://localhost:3000                                                                       |
+| Alertas do Prometheus          | http://localhost:9090/alerts                                                                |
+| RabbitMQ Management            | http://localhost:15672                                                                      |
+| Traces e logs                  | Grafana → Explore → Tempo (pelo `x-trace-id`) ou Loki                                       |
+| Estado dos serviços            | `docker compose ps`, `curl localhost:3001/health/ready`, `curl localhost:3002/health/ready` |
 
-Useful Loki query for errors and warnings: `{service_namespace="cash-flow"} | severity_number >= 13`.
+Consulta útil no Loki para erros e avisos: `{service_namespace="cash-flow"} | severity_number >= 13`.
 
-### DailyBalanceRequestLossAboveBudget (critical)
+### DailyBalanceRequestLossAboveBudget (crítico)
 
-- **Symptom:** more than 5% of report requests fail (`5xx` or `429`) for 2 minutes. This breaches the business requirement.
-- **Impact:** merchants cannot see their consolidated balance. Recording entries is not affected.
-- **Diagnosis:**
-  1. Dashboard row "API do consolidado": split by status. `429` means rate limiting; `503` with code `BALANCE_REPORT_UNAVAILABLE` means database down and nothing cached; `503 AUTHENTICATION_UNAVAILABLE` means JWKS unreachable; other `5xx` means a bug.
-  2. Check `/health/ready` of `daily-balance` and the circuit breaker panel.
+- **Sintoma:** mais de 5% das requisições ao relatório falham (`5xx` ou `429`) por 2 minutos. Isso rompe o requisito de negócio.
+- **Impacto:** os comerciantes não conseguem ver o saldo consolidado. O registro de lançamentos não é afetado.
+- **Diagnóstico:**
+  1. Linha "API do consolidado" do dashboard: separe por status. `429` indica rate limiting; `503` com código `BALANCE_REPORT_UNAVAILABLE` indica banco fora e nada em cache; `503 AUTHENTICATION_UNAVAILABLE` indica JWKS inacessível; outros `5xx` indicam bug.
+  2. Verifique o `/health/ready` do `daily-balance` e o painel de circuit breakers.
   3. Loki: `{service_name="daily-balance"} | severity_number >= 17`.
-- **Mitigation:** for `429` caused by legitimate load, raise `RATE_LIMIT_MAX` or add replicas; for database problems, see `CircuitBreakerOpen`; for Keycloak, restore it (tokens already issued keep working once keys are cached).
-- **Recovery:** confirm the success ratio is back above 99.5% on the dashboard.
+- **Mitigação:** para `429` causado por carga legítima, aumente `RATE_LIMIT_MAX` ou adicione réplicas; para problemas no banco, veja `CircuitBreakerOpen`; para o Keycloak, restabeleça-o (tokens já emitidos continuam funcionando quando as chaves já estão em cache).
+- **Recuperação:** confirme no dashboard que a taxa de sucesso voltou a ficar acima de 99,5%.
 
-### LedgerErrorRateHigh (critical)
+### LedgerErrorRateHigh (crítico)
 
-- **Symptom:** more than 1% of ledger requests return `5xx` for 5 minutes.
-- **Impact:** entries may not be recorded; this is the most critical capability.
-- **Diagnosis:** `docker compose ps ledger postgres-ledger`; `/health/ready` of the ledger; Loki `{service_name="ledger"} | severity_number >= 17`; open a failing request trace in Tempo using the `x-trace-id` returned to the client.
-- **Mitigation:** restore `postgres-ledger` (the ledger depends only on its own database; RabbitMQ and the daily balance are not in its path). Roll back the last deployment if errors started with it.
-- **Recovery:** idempotent clients can safely retry with the same `Idempotency-Key`; no duplicate entries are created.
+- **Sintoma:** mais de 1% das requisições ao ledger retornam `5xx` por 5 minutos.
+- **Impacto:** lançamentos podem deixar de ser registrados; esta é a capacidade mais crítica.
+- **Diagnóstico:** `docker compose ps ledger postgres-ledger`; `/health/ready` do ledger; Loki `{service_name="ledger"} | severity_number >= 17`; abra no Tempo o trace de uma requisição com falha usando o `x-trace-id` devolvido ao cliente.
+- **Mitigação:** restabeleça o `postgres-ledger` (o ledger depende apenas do próprio banco; RabbitMQ e o consolidado não estão no seu caminho). Faça rollback do último deploy se os erros começaram com ele.
+- **Recuperação:** clientes idempotentes podem repetir com segurança usando a mesma `Idempotency-Key`; nenhum lançamento duplicado é criado.
 
-### DailyBalanceLatencyHigh (warning)
+### DailyBalanceLatencyHigh (aviso)
 
-- **Symptom:** report p95 above 500 ms for 5 minutes.
-- **Diagnosis:** cache hit ratio panel (a drop in `hit` pushes load to the database); `DATABASE_TIMEOUT_MS` errors in logs; slow spans in Tempo filtered by `service.name = daily-balance`.
-- **Mitigation:** check Redis health; add API replicas; check database load (long period reports up to 92 days are the most expensive).
+- **Sintoma:** p95 do relatório acima de 500 ms por 5 minutos.
+- **Diagnóstico:** painel de taxa de acerto do cache (uma queda nos `hit` empurra carga para o banco); erros de `DATABASE_TIMEOUT_MS` nos logs; spans lentos no Tempo filtrados por `service.name = daily-balance`.
+- **Mitigação:** verifique a saúde do Redis; adicione réplicas da API; verifique a carga do banco (relatórios de período longo, até 92 dias, são os mais caros).
 
-### OutboxLagHigh (warning)
+### OutboxLagHigh (aviso)
 
-- **Symptom:** the oldest pending event is older than 60 s.
-- **Impact:** the daily balance stops receiving new entries; recording is not affected.
-- **Diagnosis:**
-  1. `docker compose ps ledger-outbox-relay rabbitmq`; relay `/health/ready` reports PostgreSQL and RabbitMQ.
-  2. Rejected events: panel "Publicação do relay" (`cashflow_outbox_rejected_total`).
-  3. Stuck events in the ledger database:
+- **Sintoma:** o evento pendente mais antigo tem mais de 60 s.
+- **Impacto:** o consolidado para de receber novos lançamentos; o registro não é afetado.
+- **Diagnóstico:**
+  1. `docker compose ps ledger-outbox-relay rabbitmq`; o `/health/ready` do relay reporta PostgreSQL e RabbitMQ.
+  2. Eventos rejeitados: painel "Publicação do relay" (`cashflow_outbox_rejected_total`).
+  3. Eventos parados no banco do ledger:
      ```sql
      SELECT event_type, attempts, last_error, next_attempt_at
      FROM outbox WHERE published_at IS NULL ORDER BY occurred_at LIMIT 20;
      ```
-     `last_error` containing "has no bound queue" means no queue is bound for that event type (consumer topology missing).
-- **Mitigation:** restart the relay or the broker; if events are unroutable, start the daily balance consumer (it declares its queues) — the relay retries them automatically with backoff (up to 5 minutes between attempts).
-- **Recovery:** pending count returns to 0; no manual republish is needed.
+     Um `last_error` contendo "has no bound queue" significa que não há fila ligada para aquele tipo de evento (topologia do consumidor ausente).
+- **Mitigação:** reinicie o relay ou o broker; se os eventos estiverem sem rota, suba o consumidor do consolidado (ele declara suas filas) — o relay tenta de novo automaticamente com backoff (até 5 minutos entre tentativas).
+- **Recuperação:** o número de pendentes volta a 0; não é preciso republicar nada manualmente.
 
-### ConsolidationLagHigh (warning)
+### ConsolidationLagHigh (aviso)
 
-- **Symptom:** p95 time from recording to consolidation above 30 s.
-- **Diagnosis:** is the delay in the outbox (`OutboxLagHigh`) or in the queue (`ConsumerBacklogGrowing`)? Consumer outcome panel: many `retry` outcomes indicate database trouble on the daily balance side.
-- **Mitigation:** fix the upstream cause; scale consumers or increase `CONSUMER_PREFETCH` if throughput is the issue.
+- **Sintoma:** p95 do tempo entre o registro e a consolidação acima de 30 s.
+- **Diagnóstico:** o atraso está no outbox (`OutboxLagHigh`) ou na fila (`ConsumerBacklogGrowing`)? Painel de resultados do consumidor: muitos resultados `retry` indicam problema no banco do lado do consolidado.
+- **Mitigação:** corrija a causa anterior; escale os consumidores ou aumente `CONSUMER_PREFETCH` se o problema for throughput.
 
-### ConsumerBacklogGrowing (warning)
+### ConsumerBacklogGrowing (aviso)
 
-- **Symptom:** more than 1,000 messages ready in `daily-balance.ledger-events` for 5 minutes.
-- **Diagnosis:** `docker compose ps daily-balance-consumer`; consumer `/health/ready` (`ledger-events-consumer` must be `up`); retries in the consumer outcome panel.
-- **Mitigation:** restart or scale the consumer (`docker compose up -d --scale daily-balance-consumer=3`); consumers are idempotent and safe to run in parallel.
+- **Sintoma:** mais de 1.000 mensagens prontas em `daily-balance.ledger-events` por 5 minutos.
+- **Diagnóstico:** `docker compose ps daily-balance-consumer`; `/health/ready` do consumidor (`ledger-events-consumer` precisa estar `up`); retentativas no painel de resultados do consumidor.
+- **Mitigação:** reinicie ou escale o consumidor (`docker compose up -d --scale daily-balance-consumer=3`); os consumidores são idempotentes e seguros para rodar em paralelo.
 
-### DeadLetterQueueNotEmpty (critical)
+### DeadLetterQueueNotEmpty (crítico)
 
-- **Symptom:** messages in `daily-balance.ledger-events.dlq`.
-- **Impact:** the daily balance is missing those entries until they are redriven.
-- **Diagnosis:** RabbitMQ management → Queues → `daily-balance.ledger-events.dlq` → Get messages (with "Nack, requeue true"). Read the `x-dead-letter-reason` header:
-  - `Message body is not valid JSON` or `does not match the ledger event contract`: a producer or contract bug; do not redrive until fixed;
-  - `Gave up after N attempts: ...`: transient problem (usually the database) that lasted longer than `CONSUMER_MAX_ATTEMPTS × CONSUMER_RETRY_DELAY_MS`.
-- **Mitigation:** fix the cause first.
-- **Recovery:**
+- **Sintoma:** mensagens em `daily-balance.ledger-events.dlq`.
+- **Impacto:** o consolidado está sem esses lançamentos até que eles sejam devolvidos à fila (redrive).
+- **Diagnóstico:** RabbitMQ Management → Queues → `daily-balance.ledger-events.dlq` → Get messages (com "Nack, requeue true"). Leia o header `x-dead-letter-reason`:
+  - `Message body is not valid JSON` ou `does not match the ledger event contract`: bug no produtor ou no contrato; não faça o redrive antes de corrigir;
+  - `Gave up after N attempts: ...`: problema transitório (normalmente o banco) que durou mais que `CONSUMER_MAX_ATTEMPTS × CONSUMER_RETRY_DELAY_MS`.
+- **Mitigação:** corrija a causa primeiro.
+- **Recuperação:**
   ```bash
   docker compose exec daily-balance-consumer node dist/redrive-dead-letters.js --limit 1000
   ```
-  Redriving an event that was already applied is safe (deduplication by event and entry id). If a day is suspected to be wrong, rebuild it from the journal:
+  Devolver um evento que já foi aplicado é seguro (deduplicação por id do evento e do lançamento). Se houver suspeita de que um dia está errado, reconstrua-o a partir do diário:
   ```bash
   docker compose exec daily-balance-consumer node dist/rebuild-day.js --merchant <merchant-id> --date <yyyy-mm-dd>
   ```
 
-### CircuitBreakerOpen (warning)
+### CircuitBreakerOpen (aviso)
 
-- **Symptom:** `cashflow_circuit_breaker_state == 2` for a circuit (`redis` or `postgres`) for more than 1 minute.
-- **Impact:** `redis` open: no caching, all reads go to the database (higher latency, no stale fallback for new reports). `postgres` open: only cached reports are served (`STALE`); others get `503`.
-- **Diagnosis:** health of the dependency (`docker compose ps redis postgres-daily-balance`); logs `circuit breaker state changed`.
-- **Mitigation:** restore the dependency; the circuit closes by itself after a successful trial call (every `CIRCUIT_RESET_TIMEOUT_MS`).
+- **Sintoma:** `cashflow_circuit_breaker_state == 2` para um circuito (`redis` ou `postgres`) por mais de 1 minuto.
+- **Impacto:** `redis` aberto: sem cache, todas as leituras vão ao banco (latência maior, sem fallback de dado obsoleto para relatórios novos). `postgres` aberto: só relatórios em cache são servidos (`STALE`); os demais recebem `503`.
+- **Diagnóstico:** saúde da dependência (`docker compose ps redis postgres-daily-balance`); logs `circuit breaker state changed`.
+- **Mitigação:** restabeleça a dependência; o circuito fecha sozinho depois de uma chamada de teste bem-sucedida (a cada `CIRCUIT_RESET_TIMEOUT_MS`).
 
-### StaleBalanceReportsServed (warning)
+### StaleBalanceReportsServed (aviso)
 
-- **Symptom:** responses with `x-cache: STALE`.
-- **Impact:** merchants see a balance computed before the database became unavailable (the response carries `generatedAt`).
-- **Mitigation:** same as `CircuitBreakerOpen` for `postgres`. Once the database returns, fresh reports replace the stale ones automatically.
+- **Sintoma:** respostas com `x-cache: STALE`.
+- **Impacto:** os comerciantes veem um saldo calculado antes de o banco ficar indisponível (a resposta traz `generatedAt`).
+- **Mitigação:** a mesma de `CircuitBreakerOpen` para `postgres`. Quando o banco volta, relatórios atualizados substituem os obsoletos automaticamente.
 
-### ServiceNotReportingTelemetry (critical)
+### ServiceNotReportingTelemetry (crítico)
 
-- **Symptom:** `cashflow_service_up` absent for a job.
-- **Diagnosis:** `docker compose ps`; container logs (`docker compose logs <service> --tail 200`); if the process is running, check the Collector (`docker compose logs otel-collector`).
-- **Mitigation:** restart the service; check resource limits and crash loops (startup fails fast on invalid configuration and on an unreachable database for migrations).
+- **Sintoma:** `cashflow_service_up` ausente para um job.
+- **Diagnóstico:** `docker compose ps`; logs do container (`docker compose logs <service> --tail 200`); se o processo estiver rodando, verifique o Collector (`docker compose logs otel-collector`).
+- **Mitigação:** reinicie o serviço; verifique limites de recursos e reinícios em loop (a inicialização falha rápido com configuração inválida e com banco inacessível para as migrations).
 
-## Backup and disaster recovery
+## Backup e recuperação de desastres
 
-| Data store               | Role                              | RPO target                                  | RTO target | Backup strategy (production)                                        | Rebuildable?                               |
-| ------------------------ | --------------------------------- | ------------------------------------------- | ---------- | ------------------------------------------------------------------- | ------------------------------------------ |
-| Ledger PostgreSQL        | Source of truth (entries, outbox) | ≤ 5 min (PITR, near zero with sync replica) | ≤ 30 min   | Continuous WAL archiving + daily snapshots, multi-AZ standby        | No — it is the source of truth             |
-| Daily balance PostgreSQL | Read model and movement journal   | ≤ 1 h                                       | ≤ 1 h      | Daily snapshots + WAL                                               | Yes, from ledger events                    |
-| RabbitMQ                 | Transport                         | n/a                                         | ≤ 15 min   | Quorum queues replicated across 3 nodes                             | Yes, unpublished events stay in the outbox |
-| Redis                    | Cache                             | n/a                                         | minutes    | None needed                                                         | Yes, refilled on demand                    |
-| Keycloak database        | Users, realm                      | ≤ 1 h                                       | ≤ 1 h      | Daily snapshots; realm configuration is versioned in the repository | Realm yes (import); users need backup      |
+| Armazenamento             | Papel                                    | Meta de RPO                                          | Meta de RTO | Estratégia de backup (produção)                                           | Reconstruível?                                        |
+| ------------------------- | ---------------------------------------- | ---------------------------------------------------- | ----------- | ------------------------------------------------------------------------- | ----------------------------------------------------- |
+| PostgreSQL do ledger      | Fonte da verdade (lançamentos, outbox)   | ≤ 5 min (PITR, próximo de zero com réplica síncrona) | ≤ 30 min    | Arquivamento contínuo de WAL + snapshots diários, standby Multi-AZ        | Não — é a fonte da verdade                            |
+| PostgreSQL do consolidado | Modelo de leitura e diário de movimentos | ≤ 1 h                                                | ≤ 1 h       | Snapshots diários + WAL                                                   | Sim, a partir dos eventos do ledger                   |
+| RabbitMQ                  | Transporte                               | n/a                                                  | ≤ 15 min    | Quorum queues replicadas em 3 nós                                         | Sim, eventos não publicados ficam no outbox           |
+| Redis                     | Cache                                    | n/a                                                  | minutos     | Não é necessário                                                          | Sim, preenchido sob demanda                           |
+| Banco do Keycloak         | Usuários, realm                          | ≤ 1 h                                                | ≤ 1 h       | Snapshots diários; a configuração do realm está versionada no repositório | O realm sim (importação); usuários precisam de backup |
 
-**Rebuilding the daily balance after losing its database:**
+**Reconstruindo o consolidado depois de perder seu banco:**
 
-1. Restore the latest snapshot (or start empty); migrations run on startup.
-2. Republish ledger events for the affected period by resetting the outbox:
+1. Restaure o snapshot mais recente (ou comece vazio); as migrations rodam na inicialização.
+2. Republique os eventos do ledger do período afetado reiniciando o outbox:
    ```sql
    UPDATE outbox SET published_at = NULL, attempts = 0, next_attempt_at = now()
    WHERE occurred_at >= '<start of the period>';
    ```
-3. The relay publishes them again; the consumer deduplicates events already present in the restored journal and applies the rest.
-4. Validate a sample of days against the ledger (sum of entries by merchant and business date) and run `rebuild-day` where needed.
+3. O relay publica os eventos de novo; o consumidor descarta os que já estão no diário restaurado e aplica o restante.
+4. Valide uma amostra de dias contra o ledger (soma dos lançamentos por comerciante e data de competência) e rode o `rebuild-day` onde for necessário.
 
-This relies on keeping published outbox rows for at least the retention window of daily balance backups (see housekeeping).
+Isso depende de manter as linhas publicadas do outbox por pelo menos o período de retenção dos backups do consolidado (veja manutenção).
 
-**DR testing cadence:** restore the ledger from backup into a scratch environment quarterly; run the daily balance rebuild procedure semi-annually; run the automated resilience tests (`npm run test:resilience*`) on every release.
+**Frequência dos testes de recuperação de desastres:** restaurar o ledger a partir do backup em um ambiente descartável a cada trimestre; executar o procedimento de reconstrução do consolidado a cada semestre; rodar os testes automatizados de resiliência (`npm run test:resilience*`) a cada release.
 
-## Deployment practices
+## Práticas de deploy
 
-- **Zero-downtime deploys:** rolling updates with readiness gates. The API readiness reports dependencies; for the daily balance API, shared dependencies are non-critical (`degraded`) so replicas are not removed all at once.
-- **Migrations:** run at startup under a PostgreSQL advisory lock, so multiple replicas starting together apply each migration once. Migrations must be backward compatible (expand/contract): add columns and tables first, deploy code that uses them, remove old structures in a later release.
-- **Event contracts:** breaking changes become a new event version (`v2`) published alongside `v1` until all consumers migrate.
-- **Health checks:** `/health/live` only says the process is alive (used for restarts); `/health/ready` checks dependencies (used for routing traffic). Relay and consumer expose the same endpoints on their health server.
-- **Configuration:** validated at startup; an invalid value stops the process with a clear error.
+- **Deploys sem downtime:** atualizações graduais (rolling updates) condicionadas ao readiness. O readiness da API reporta as dependências; na API do consolidado, as dependências compartilhadas são não críticas (`degraded`), para que as réplicas não sejam removidas todas de uma vez.
+- **Migrations:** rodam na inicialização sob um advisory lock do PostgreSQL, então várias réplicas subindo juntas aplicam cada migration uma única vez. As migrations precisam ser retrocompatíveis (expand/contract): primeiro adicionar colunas e tabelas, depois fazer o deploy do código que as usa, e remover estruturas antigas em uma release posterior.
+- **Contratos de eventos:** mudanças incompatíveis viram uma nova versão do evento (`v2`), publicada junto com a `v1` até que todos os consumidores migrem.
+- **Health checks:** `/health/live` apenas diz que o processo está vivo (usado para reinícios); `/health/ready` verifica as dependências (usado para direcionar tráfego). Relay e consumidor expõem os mesmos endpoints no seu servidor de health.
+- **Configuração:** validada na inicialização; um valor inválido interrompe o processo com um erro claro.
 
-### Scaling and tuning knobs
+### Parâmetros de escala e ajuste
 
-| Variable                     | Process                | Default | Effect                                                 |
-| ---------------------------- | ---------------------- | ------- | ------------------------------------------------------ |
-| `DATABASE_POOL_SIZE`         | all                    | 10      | Connections per replica                                |
-| `RATE_LIMIT_MAX`             | ledger                 | 1,200   | Requests per merchant per window (per replica)         |
-| `RATE_LIMIT_MAX`             | daily-balance          | 6,000   | Requests per merchant per window (per replica)         |
-| `RATE_LIMIT_WINDOW_MS`       | APIs                   | 60,000  | Rate limit window                                      |
-| `MAX_BACKDATED_DAYS`         | ledger                 | 30      | Oldest business date accepted                          |
-| `OUTBOX_BATCH_SIZE`          | ledger-outbox-relay    | 100     | Events per cycle (max 1,000)                           |
-| `OUTBOX_POLL_INTERVAL_MS`    | ledger-outbox-relay    | 500     | Idle wait between cycles                               |
-| `OUTBOX_MAX_BACKOFF_MS`      | ledger-outbox-relay    | 30,000  | Maximum wait after infrastructure failures             |
-| `OUTBOX_RETRY_BASE_DELAY_MS` | ledger-outbox-relay    | 1,000   | First retry delay for a rejected event                 |
-| `OUTBOX_RETRY_MAX_DELAY_MS`  | ledger-outbox-relay    | 300,000 | Maximum retry delay for a rejected event               |
-| `CONSUMER_PREFETCH`          | daily-balance-consumer | 20      | Messages processed in parallel per replica (max 1,000) |
-| `CONSUMER_MAX_ATTEMPTS`      | daily-balance-consumer | 5       | Attempts before the DLQ                                |
-| `CONSUMER_RETRY_DELAY_MS`    | daily-balance-consumer | 10,000  | Wait in the retry queue                                |
-| `CACHE_FRESH_TTL_MS`         | daily-balance          | 5,000   | Report freshness in the cache                          |
-| `CACHE_STALE_TTL_SECONDS`    | daily-balance          | 86,400  | How long a report is kept as fallback                  |
-| `CACHE_TIMEOUT_MS`           | daily-balance          | 100     | Maximum time of a Redis call                           |
-| `DATABASE_TIMEOUT_MS`        | daily-balance          | 2,000   | Connection and statement timeout                       |
-| `CIRCUIT_FAILURE_THRESHOLD`  | daily-balance          | 5       | Consecutive failures that open a circuit               |
-| `CIRCUIT_RESET_TIMEOUT_MS`   | daily-balance          | 10,000  | Time open before a trial call                          |
+| Variável                     | Processo               | Padrão  | Efeito                                                       |
+| ---------------------------- | ---------------------- | ------- | ------------------------------------------------------------ |
+| `DATABASE_POOL_SIZE`         | todos                  | 10      | Conexões por réplica                                         |
+| `RATE_LIMIT_MAX`             | ledger                 | 1.200   | Requisições por comerciante por janela (por réplica)         |
+| `RATE_LIMIT_MAX`             | daily-balance          | 6.000   | Requisições por comerciante por janela (por réplica)         |
+| `RATE_LIMIT_WINDOW_MS`       | APIs                   | 60.000  | Janela do rate limit                                         |
+| `MAX_BACKDATED_DAYS`         | ledger                 | 30      | Data de competência mais antiga aceita                       |
+| `OUTBOX_BATCH_SIZE`          | ledger-outbox-relay    | 100     | Eventos por ciclo (máximo 1.000)                             |
+| `OUTBOX_POLL_INTERVAL_MS`    | ledger-outbox-relay    | 500     | Espera entre ciclos quando ocioso                            |
+| `OUTBOX_MAX_BACKOFF_MS`      | ledger-outbox-relay    | 30.000  | Espera máxima após falhas de infraestrutura                  |
+| `OUTBOX_RETRY_BASE_DELAY_MS` | ledger-outbox-relay    | 1.000   | Atraso da primeira retentativa de um evento rejeitado        |
+| `OUTBOX_RETRY_MAX_DELAY_MS`  | ledger-outbox-relay    | 300.000 | Atraso máximo de retentativa de um evento rejeitado          |
+| `CONSUMER_PREFETCH`          | daily-balance-consumer | 20      | Mensagens processadas em paralelo por réplica (máximo 1.000) |
+| `CONSUMER_MAX_ATTEMPTS`      | daily-balance-consumer | 5       | Tentativas antes da DLQ                                      |
+| `CONSUMER_RETRY_DELAY_MS`    | daily-balance-consumer | 10.000  | Espera na fila de retentativa                                |
+| `CACHE_FRESH_TTL_MS`         | daily-balance          | 5.000   | Tempo em que o relatório em cache é considerado atual        |
+| `CACHE_STALE_TTL_SECONDS`    | daily-balance          | 86.400  | Por quanto tempo o relatório é mantido como reserva          |
+| `CACHE_TIMEOUT_MS`           | daily-balance          | 100     | Tempo máximo de uma chamada ao Redis                         |
+| `DATABASE_TIMEOUT_MS`        | daily-balance          | 2.000   | Timeout de conexão e de consulta                             |
+| `CIRCUIT_FAILURE_THRESHOLD`  | daily-balance          | 5       | Falhas consecutivas que abrem um circuito                    |
+| `CIRCUIT_RESET_TIMEOUT_MS`   | daily-balance          | 10.000  | Tempo aberto antes de uma chamada de teste                   |
 
-To tolerate longer database outages without the DLQ, increase `CONSUMER_MAX_ATTEMPTS × CONSUMER_RETRY_DELAY_MS` (default window about 50 s).
+Para tolerar quedas mais longas do banco sem recorrer à DLQ, aumente `CONSUMER_MAX_ATTEMPTS × CONSUMER_RETRY_DELAY_MS` (janela padrão de cerca de 50 s).
 
-### Capacity reference
+### Referência de capacidade
 
-Measured on an Apple M1 laptop with all containers on the same machine, one replica per process:
+Medido em um notebook Apple M1 com todos os containers na mesma máquina, uma réplica por processo:
 
-| Load                                           | Failures | p95     |
-| ---------------------------------------------- | -------- | ------- |
-| 50 req/s on the daily balance (2 min)          | 0%       | 6.5 ms  |
-| 200 req/s                                      | 0%       | 7.6 ms  |
-| 400 req/s                                      | 0%       | 20.9 ms |
-| 10 req/s of writes with the daily balance down | 0%       | 20 ms   |
+| Carga                                              | Falhas | p95     |
+| -------------------------------------------------- | ------ | ------- |
+| 50 req/s no consolidado (2 min)                    | 0%     | 6,5 ms  |
+| 200 req/s                                          | 0%     | 7,6 ms  |
+| 400 req/s                                          | 0%     | 20,9 ms |
+| 10 req/s de gravações com o consolidado fora do ar | 0%     | 20 ms   |
 
-Horizontal scaling: APIs and consumers are stateless (state lives in PostgreSQL, Redis and RabbitMQ); the relay scales with `SKIP LOCKED`; the per-replica rate limit must be adjusted or moved to a shared store when replicas are added.
+Escala horizontal: APIs e consumidores não guardam estado (o estado fica no PostgreSQL, no Redis e no RabbitMQ); o relay escala com `SKIP LOCKED`; o rate limit por réplica precisa ser ajustado ou levado para um armazenamento compartilhado quando réplicas são adicionadas.
 
-## Housekeeping
+## Manutenção
 
-| Item                  | Current state                                               | Plan                                                                                           |
-| --------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Published outbox rows | Kept forever                                                | Periodic job deleting rows published more than N days ago (N ≥ daily balance backup retention) |
-| Idempotency keys      | Kept forever                                                | Expire after 24–72 h (clients retry within minutes)                                            |
-| Movement journal      | Kept forever                                                | Archive closed periods to cold storage                                                         |
-| Logs and traces       | 7-day Prometheus retention; Tempo blocks 24 h; Loki default | Production: object storage with 30-day logs and traces, 13-month metrics downsampled           |
+| Item                        | Situação atual                                                             | Plano                                                                                                |
+| --------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Linhas publicadas do outbox | Mantidas para sempre                                                       | Job periódico apagando linhas publicadas há mais de N dias (N ≥ retenção dos backups do consolidado) |
+| Chaves de idempotência      | Mantidas para sempre                                                       | Expirar após 24–72 h (clientes repetem em questão de minutos)                                        |
+| Diário de movimentos        | Mantido para sempre                                                        | Arquivar períodos fechados em armazenamento frio                                                     |
+| Logs e traces               | Retenção de 7 dias no Prometheus; blocos do Tempo por 24 h; padrão do Loki | Produção: object storage com 30 dias de logs e traces, 13 meses de métricas com downsampling         |

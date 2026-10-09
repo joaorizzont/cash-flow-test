@@ -1,58 +1,58 @@
-# ADR-0005: Transactional outbox with a polling relay
+# ADR-0005: Transactional Outbox com relay por polling
 
-- **Status:** Accepted
-- **Date:** 2026-10-09
+- **Status:** Aceita
+- **Data:** 2026-10-09
 
-## Context
+## Contexto
 
-Every recorded or reversed entry must produce an event for the daily balance. Writing the entry to the database and then publishing to the broker is a dual write: if the process dies between the two, either the event is lost (balance wrong forever) or the event is published for an entry that was rolled back. Publishing inside the HTTP request would also put the broker in the critical path of recording, violating the requirement that recording keeps working when other parts fail.
+Todo lançamento registrado ou estornado precisa gerar um evento para o consolidado. Gravar o lançamento no banco e depois publicar no broker é um dual write: se o processo cair entre as duas operações, ou o evento se perde (saldo errado para sempre) ou é publicado um evento de um lançamento que sofreu rollback. Publicar dentro da requisição HTTP também colocaria o broker no caminho crítico do registro, violando o requisito de que o registro continue funcionando quando outras partes falham.
 
-## Decision
+## Decisão
 
-Use the **Transactional Outbox** pattern:
+Usar o padrão **Transactional Outbox**:
 
-1. The ledger writes the entry and its event (a CloudEvent, [ADR-0007](0007-cloudevents-shared-contracts.md)) to the `outbox` table in the **same transaction**. The API never talks to the broker.
-2. A separate process, `ledger-outbox-relay` (same image, different command), runs a polling worker:
-   - selects up to `OUTBOX_BATCH_SIZE` pending events whose `next_attempt_at` has passed, with `FOR UPDATE SKIP LOCKED`;
-   - publishes them in parallel to RabbitMQ with **publisher confirms**, `persistent` messages and the **`mandatory`** flag;
-   - marks confirmed events as published; events returned by the broker (no queue bound) are rejected individually and rescheduled with **per-message exponential backoff** (`attempts`, `last_error`, `next_attempt_at`, 1 s up to 5 min);
-   - if the failure is infrastructure (database or broker unavailable), the whole batch is rolled back and the worker backs off (up to 30 s).
-3. Pacing: immediately again when the batch published something, after `OUTBOX_POLL_INTERVAL_MS` (500 ms) when idle.
+1. O ledger grava o lançamento e o seu evento (um CloudEvent, [ADR-0007](0007-cloudevents-shared-contracts.md)) na tabela `outbox`, **na mesma transação**. A API nunca fala com o broker.
+2. Um processo separado, `ledger-outbox-relay` (mesma imagem, outro comando), roda um worker de polling que:
+   - seleciona até `OUTBOX_BATCH_SIZE` eventos pendentes cujo `next_attempt_at` já passou, com `FOR UPDATE SKIP LOCKED`;
+   - publica os eventos em paralelo no RabbitMQ com **publisher confirms**, mensagens `persistent` e a flag **`mandatory`**;
+   - marca como publicados os eventos confirmados; eventos devolvidos pelo broker (sem fila ligada) são rejeitados individualmente e reagendados com **backoff exponencial por mensagem** (`attempts`, `last_error`, `next_attempt_at`, de 1 s até 5 min);
+   - se a falha for de infraestrutura (banco ou broker indisponível), o lote inteiro sofre rollback e o worker aplica backoff (até 30 s).
+3. Ritmo: roda de novo imediatamente quando o lote publicou algo, e após `OUTBOX_POLL_INTERVAL_MS` (500 ms) quando está ocioso.
 
-Delivery is **at least once**; the CloudEvent `id` (also sent as AMQP `messageId`) lets consumers deduplicate.
+A entrega é **at-least-once**; o `id` do CloudEvent (também enviado como `messageId` do AMQP) permite que os consumidores descartem duplicatas.
 
-## Alternatives considered
+## Alternativas consideradas
 
-| Alternative                               | Why it was not chosen                                                                                                    |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Publish directly from the request         | Dual write, and the broker becomes a dependency of recording                                                             |
-| Publish after commit, best effort         | Loses events on crash between commit and publish                                                                         |
-| Relay as a background task inside the API | Shares resources and lifecycle with the API; scaling and failures are coupled                                            |
-| CDC with Debezium reading the WAL         | Millisecond latency and no polling, but adds Kafka Connect or Debezium Server to operate. Recorded as a future evolution |
-| `LISTEN/NOTIFY` to wake the relay         | Lower latency, but needs a dedicated connection and polling would still be required as a safety net. Future evolution    |
-| Alternate exchange for unroutable events  | Would park messages in another queue requiring manual reprocessing; keeping them in the outbox with backoff is simpler   |
+| Alternativa                                   | Por que não foi escolhida                                                                                                             |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Publicar direto na requisição                 | Dual write, e o broker vira dependência do registro                                                                                   |
+| Publicar depois do commit, em melhor esforço  | Perde eventos se o processo cair entre o commit e a publicação                                                                        |
+| Relay como tarefa em background dentro da API | Compartilha recursos e ciclo de vida com a API; escala e falhas ficam acopladas                                                       |
+| CDC com Debezium lendo o WAL                  | Latência de milissegundos e sem polling, mas acrescenta Kafka Connect ou Debezium Server para operar. Registrado como evolução futura |
+| `LISTEN/NOTIFY` para acordar o relay          | Menor latência, mas exige uma conexão dedicada e o polling continuaria necessário como rede de segurança. Evolução futura             |
+| Alternate exchange para eventos sem rota      | Estacionaria as mensagens em outra fila, exigindo reprocessamento manual; mantê-las no outbox com backoff é mais simples              |
 
-## Consequences
+## Consequências
 
-**Positive**
+**Positivas**
 
-- No event is lost: verified by recording 900 entries while the whole consolidated side was down and checking that all 900 were consolidated with the exact total.
-- RabbitMQ outages do not affect recording; events accumulate in the outbox and are published when the broker returns (the relay reconnects automatically).
-- One problematic event never blocks the others (head-of-line blocking was found during development and fixed by the per-message backoff).
-- Horizontal scaling of the relay without duplicates: an integration test runs three relays concurrently over 40 events and each is published exactly once.
+- Nenhum evento é perdido: verificado gravando 900 lançamentos com todo o lado do consolidado fora do ar e conferindo que os 900 foram consolidados com o total exato.
+- Quedas do RabbitMQ não afetam o registro; os eventos se acumulam no outbox e são publicados quando o broker volta (o relay reconecta automaticamente).
+- Um evento problemático nunca bloqueia os demais (o head-of-line blocking foi encontrado durante o desenvolvimento e corrigido com o backoff por mensagem).
+- Escala horizontal do relay sem duplicatas: um teste de integração roda três relays em paralelo sobre 40 eventos, e cada um é publicado exatamente uma vez.
 
-**Negative / trade-offs**
+**Negativas / trade-offs**
 
-- Up to about 500 ms of extra latency when idle (measured consolidation lag: p50 0.26 s, p95 0.5 s), irrelevant for a daily report.
-- One query every 500 ms when idle; cheap because a partial index contains only pending rows.
-- The outbox grows; a cleanup job for published rows is a pending housekeeping item.
-- Duplicates are possible (crash between publish and mark), so every consumer must be idempotent.
+- Até cerca de 500 ms de latência extra quando ocioso (atraso de consolidação medido: p50 de 0,26 s, p95 de 0,5 s), irrelevante para um relatório diário.
+- Uma consulta a cada 500 ms quando ocioso; barata porque um índice parcial contém apenas as linhas pendentes.
+- O outbox cresce; um job de limpeza das linhas publicadas é uma pendência de manutenção.
+- Duplicatas são possíveis (queda entre a publicação e a marcação), então todo consumidor precisa ser idempotente.
 
-## Evidence
+## Evidências
 
-- Outbox write in the same transaction: [postgres-entry-repository.ts](../../services/ledger/src/adapters/outbound/postgres/postgres-entry-repository.ts), [outbox-writer.ts](../../services/ledger/src/adapters/outbound/postgres/outbox-writer.ts)
-- Locking and failure recording: [postgres-outbox-store.ts](../../services/ledger/src/adapters/outbound/postgres/postgres-outbox-store.ts)
-- Batch logic and rejection isolation: [publish-pending-events-service.ts](../../services/ledger/src/application/use-cases/publish-pending-events-service.ts), [retry-backoff.ts](../../services/ledger/src/application/services/retry-backoff.ts)
-- Confirms and `mandatory`: [rabbitmq-event-publisher.ts](../../services/ledger/src/adapters/outbound/messaging/rabbitmq-event-publisher.ts), [unroutable-event-error.ts](../../services/ledger/src/adapters/outbound/messaging/unroutable-event-error.ts)
-- Worker pacing and backoff: [polling-worker.ts](../../services/ledger/src/adapters/inbound/scheduler/polling-worker.ts)
-- Retry columns: [0004-add-outbox-retry-columns.ts](../../services/ledger/src/adapters/outbound/postgres/migrations/0004-add-outbox-retry-columns.ts)
+- Gravação no outbox na mesma transação: [postgres-entry-repository.ts](../../services/ledger/src/adapters/outbound/postgres/postgres-entry-repository.ts), [outbox-writer.ts](../../services/ledger/src/adapters/outbound/postgres/outbox-writer.ts)
+- Lock e registro de falhas: [postgres-outbox-store.ts](../../services/ledger/src/adapters/outbound/postgres/postgres-outbox-store.ts)
+- Lógica do lote e isolamento de rejeições: [publish-pending-events-service.ts](../../services/ledger/src/application/use-cases/publish-pending-events-service.ts), [retry-backoff.ts](../../services/ledger/src/application/services/retry-backoff.ts)
+- Confirms e `mandatory`: [rabbitmq-event-publisher.ts](../../services/ledger/src/adapters/outbound/messaging/rabbitmq-event-publisher.ts), [unroutable-event-error.ts](../../services/ledger/src/adapters/outbound/messaging/unroutable-event-error.ts)
+- Ritmo e backoff do worker: [polling-worker.ts](../../services/ledger/src/adapters/inbound/scheduler/polling-worker.ts)
+- Colunas de retentativa: [0004-add-outbox-retry-columns.ts](../../services/ledger/src/adapters/outbound/postgres/migrations/0004-add-outbox-retry-columns.ts)

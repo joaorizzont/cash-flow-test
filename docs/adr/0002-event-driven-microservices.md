@@ -1,63 +1,63 @@
-# ADR-0002: Event-driven microservices
+# ADR-0002: Microsserviços orientados a eventos
 
-- **Status:** Accepted
-- **Date:** 2026-10-09
+- **Status:** Aceita
+- **Data:** 2026-10-09
 
-## Context
+## Contexto
 
-The business needs two capabilities: recording cash entries (credits and debits) and reporting the consolidated daily balance. The strongest non-functional requirement is that **the entry recording service must stay available when the daily balance service is down**. The daily balance service must sustain **50 requests per second at peak with at most 5% loss**.
+O negócio precisa de duas capacidades: registrar os lançamentos de caixa (créditos e débitos) e informar o saldo diário consolidado. O requisito não funcional mais forte é que **o serviço de registro de lançamentos continue disponível quando o serviço de consolidado diário estiver fora do ar**. O consolidado precisa suportar **50 requisições por segundo no pico, com no máximo 5% de perda**.
 
-These two capabilities have very different profiles:
+As duas capacidades têm perfis muito diferentes:
 
-| Aspect            | Ledger (recording)                         | Daily balance (reporting)  |
-| ----------------- | ------------------------------------------ | -------------------------- |
-| Nature            | Write-heavy, source of truth               | Read-heavy, derived data   |
-| Consistency       | Strong (money, idempotency)                | Eventual is acceptable     |
-| Failure tolerance | Must not fail because of the other context | Can lag behind for seconds |
-| Scaling driver    | Number of sales                            | Report queries at peak     |
+| Aspecto                  | Ledger (registro)                           | Consolidado (relatório)             |
+| ------------------------ | ------------------------------------------- | ----------------------------------- |
+| Natureza                 | Escrita intensa, fonte da verdade           | Leitura intensa, dado derivado      |
+| Consistência             | Forte (dinheiro, idempotência)              | Eventual é aceitável                |
+| Tolerância a falhas      | Não pode falhar por causa do outro contexto | Pode ficar alguns segundos atrasado |
+| O que determina a escala | Quantidade de vendas                        | Consultas de relatório no pico      |
 
-## Decision
+## Decisão
 
-Split the system into **two services aligned to the two bounded contexts** (`ledger` and `daily-balance`), each with its own process, database and deployment. They communicate **only through asynchronous events** published by the ledger to a message broker. There is no synchronous call between them in either direction.
+Dividir o sistema em **dois serviços alinhados aos dois bounded contexts** (`ledger` e `daily-balance`), cada um com seu próprio processo, banco de dados e deploy. Eles se comunicam **apenas por eventos assíncronos** publicados pelo ledger em um message broker. Não existe chamada síncrona entre eles em nenhuma direção.
 
-Each service runs as more than one process from the same image, so that work with a different profile is isolated:
+Cada serviço roda em mais de um processo a partir da mesma imagem, para isolar trabalhos com perfis diferentes:
 
-| Process                  | Responsibility                                       |
-| ------------------------ | ---------------------------------------------------- |
-| `ledger`                 | HTTP API to record, reverse and query entries        |
-| `ledger-outbox-relay`    | Publishes outbox events to the broker                |
-| `daily-balance`          | HTTP API for daily and period reports                |
-| `daily-balance-consumer` | Consumes ledger events and updates the daily balance |
+| Processo                 | Responsabilidade                                          |
+| ------------------------ | --------------------------------------------------------- |
+| `ledger`                 | API HTTP para registrar, estornar e consultar lançamentos |
+| `ledger-outbox-relay`    | Publica no broker os eventos do outbox                    |
+| `daily-balance`          | API HTTP para os relatórios diário e por período          |
+| `daily-balance-consumer` | Consome os eventos do ledger e atualiza o saldo diário    |
 
-The split stops at two services: finer decomposition (for example a separate point-of-sale service) would add operational cost without a requirement that justifies it.
+A divisão para em dois serviços: uma decomposição mais fina (por exemplo, um serviço separado de pontos de venda) adicionaria custo operacional sem um requisito que a justificasse.
 
-## Alternatives considered
+## Alternativas consideradas
 
-| Alternative                | Why it was not chosen                                                                                                                                                                            |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Monolith                   | A bug, memory leak or traffic spike in reporting would take down recording too, violating the main requirement                                                                                   |
-| Modular monolith           | Gives clean domain boundaries, but the modules share process, connection pool and deployment, so it cannot guarantee failure isolation. It would be the choice if that requirement did not exist |
-| Synchronous microservices  | If the ledger called the daily balance service (or vice versa) over HTTP, an outage of one would propagate to the other                                                                          |
-| Serverless functions       | Handles the load, but makes running the whole solution locally harder (a requirement of the challenge), increases provider lock-in and suffers from cold starts at peak                          |
-| Many fine-grained services | More moving parts, network hops and operational overhead with no requirement driving them                                                                                                        |
+| Alternativa              | Por que não foi escolhida                                                                                                                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Monólito                 | Um bug, vazamento de memória ou pico de tráfego no relatório derrubaria também o registro, violando o requisito principal                                                                        |
+| Monólito modular         | Oferece fronteiras de domínio limpas, mas os módulos compartilham processo, pool de conexões e deploy, então não garante o isolamento de falhas. Seria a escolha se esse requisito não existisse |
+| Microsserviços síncronos | Se o ledger chamasse o consolidado (ou o contrário) por HTTP, a indisponibilidade de um se propagaria para o outro                                                                               |
+| Funções serverless       | Atende à carga, mas dificulta rodar a solução inteira localmente (requisito do desafio), aumenta a dependência do provedor e sofre com cold start no pico                                        |
+| Muitos serviços pequenos | Mais partes móveis, saltos de rede e custo operacional, sem requisito que os justifique                                                                                                          |
 
-## Consequences
+## Consequências
 
-**Positive**
+**Positivas**
 
-- Real failure isolation: verified by an automated test that takes the whole daily balance side down (API, consumer and database) while entries are recorded at 10 req/s; the ledger had zero failures and every entry was consolidated after recovery.
-- Each side scales independently; the read side can add replicas for peak without touching the ledger.
-- New consumers (for example analytics or notifications) can subscribe to ledger events without changing the producer.
+- Isolamento de falhas real: verificado por um teste automatizado que derruba todo o lado do consolidado (API, consumidor e banco) enquanto lançamentos são gravados a 10 req/s; o ledger teve zero falhas e todos os lançamentos foram consolidados após a recuperação.
+- Cada lado escala de forma independente; o lado de leitura pode ganhar réplicas para o pico sem mexer no ledger.
+- Novos consumidores (por exemplo, analytics ou notificações) podem assinar os eventos do ledger sem alterar o produtor.
 
-**Negative / trade-offs**
+**Negativas / trade-offs**
 
-- The daily balance is eventually consistent (measured p95 of 0.5 s from recording to consolidation).
-- Messaging brings at-least-once delivery, which requires idempotent consumers ([ADR-0008](0008-materialized-daily-balance.md)) and a reliable way to publish ([ADR-0005](0005-transactional-outbox-with-polling-relay.md)).
-- More infrastructure to operate (broker, two databases); mitigated by Docker Compose, health checks and observability from the start ([ADR-0012](0012-opentelemetry-grafana-stack.md)).
+- O consolidado é eventualmente consistente (p95 medido de 0,5 s entre o registro e a consolidação).
+- A mensageria traz entrega at-least-once, o que exige consumidores idempotentes ([ADR-0008](0008-materialized-daily-balance.md)) e uma forma confiável de publicar ([ADR-0005](0005-transactional-outbox-with-polling-relay.md)).
+- Mais infraestrutura para operar (broker, dois bancos); mitigado com Docker Compose, health checks e observabilidade desde o início ([ADR-0012](0012-opentelemetry-grafana-stack.md)).
 
-## Evidence
+## Evidências
 
-- Composition of processes: [docker-compose.yml](../../docker-compose.yml)
-- Ledger entry points: [main.ts](../../services/ledger/src/main.ts), [relay.ts](../../services/ledger/src/relay.ts)
-- Daily balance entry points: [main.ts](../../services/daily-balance/src/main.ts), [consumer.ts](../../services/daily-balance/src/consumer.ts)
-- Resilience test: [consolidated-outage.mjs](../../tests/resilience/consolidated-outage.mjs)
+- Composição dos processos: [docker-compose.yml](../../docker-compose.yml)
+- Pontos de entrada do ledger: [main.ts](../../services/ledger/src/main.ts), [relay.ts](../../services/ledger/src/relay.ts)
+- Pontos de entrada do consolidado: [main.ts](../../services/daily-balance/src/main.ts), [consumer.ts](../../services/daily-balance/src/consumer.ts)
+- Teste de resiliência: [consolidated-outage.mjs](../../tests/resilience/consolidated-outage.mjs)

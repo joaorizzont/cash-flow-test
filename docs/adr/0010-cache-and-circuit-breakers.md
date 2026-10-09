@@ -1,58 +1,58 @@
-# ADR-0010: Cache with stale fallback and circuit breakers
+# ADR-0010: Cache com fallback de dados obsoletos e circuit breakers
 
-- **Status:** Accepted
-- **Date:** 2026-10-09
+- **Status:** Aceita
+- **Data:** 2026-10-09
 
-## Context
+## Contexto
 
-The report API must sustain 50 req/s with at most 5% loss. Its dependencies are its own PostgreSQL database and a cache. Any of them can be slow or down. A slow dependency is worse than a dead one: requests pile up holding connections until everything times out. At peak, many requests ask for the same report at the same time.
+A API de relatórios precisa sustentar 50 req/s com no máximo 5% de perda. Suas dependências são o próprio banco PostgreSQL e um cache. Qualquer uma delas pode ficar lenta ou cair. Uma dependência lenta é pior do que uma fora do ar: as requisições se acumulam segurando conexões até tudo estourar o timeout. No pico, muitas requisições pedem o mesmo relatório ao mesmo tempo.
 
-## Decision
+## Decisão
 
-The report use case is decorated with a **cache-aside** policy in the application layer, and the adapters are protected by **circuit breakers**:
+O caso de uso do relatório é decorado com uma política de **cache-aside** na camada de aplicação, e os adapters são protegidos por **circuit breakers**:
 
-| Mechanism                            | Behaviour                                                                                                                                                                                                                              |
-| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Fresh cache                          | Reports are kept in Redis; for `CACHE_FRESH_TTL_MS` (5 s) they are served as `x-cache: HIT`                                                                                                                                            |
-| Stale-if-error                       | The same entry stays in Redis for `CACHE_STALE_TTL_SECONDS` (24 h). If the database fails, the last known report is returned as `x-cache: STALE` instead of an error                                                                   |
-| Unavailable                          | With no cached report and the database down, the API answers `503` with `Retry-After`                                                                                                                                                  |
-| Single flight                        | Concurrent identical misses share one database read, preventing a stampede when an entry expires at peak                                                                                                                               |
-| Circuit breakers (Redis, PostgreSQL) | After `CIRCUIT_FAILURE_THRESHOLD` consecutive failures the circuit opens and calls fail immediately for `CIRCUIT_RESET_TIMEOUT_MS`; then a single trial call decides whether it closes                                                 |
-| Timeouts                             | `CACHE_TIMEOUT_MS` (100 ms) per Redis call; `DATABASE_TIMEOUT_MS` (2 s) for connection and statement                                                                                                                                   |
-| Best-effort cache port               | The cache adapter never throws: a Redis failure is a miss, so Redis is never a hard dependency                                                                                                                                         |
-| Readiness                            | PostgreSQL and Redis are reported as non-critical in `/health/ready` of the API (`degraded`, still `200`). All replicas share them, so failing readiness would remove every replica at once and turn a degradation into a total outage |
-| Pool error handling                  | Idle connections terminated by PostgreSQL no longer crash the process (found when testing the database outage, now covered by a regression test)                                                                                       |
+| Mecanismo                            | Comportamento                                                                                                                                                                                                                                                       |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cache fresco                         | Os relatórios ficam no Redis; durante `CACHE_FRESH_TTL_MS` (5 s) são servidos como `x-cache: HIT`                                                                                                                                                                   |
+| Stale-if-error                       | A mesma entrada fica no Redis por `CACHE_STALE_TTL_SECONDS` (24 h). Se o banco falhar, o último relatório conhecido é devolvido como `x-cache: STALE`, em vez de um erro                                                                                            |
+| Indisponível                         | Sem relatório em cache e com o banco fora, a API responde `503` com `Retry-After`                                                                                                                                                                                   |
+| Single flight                        | Misses idênticos e simultâneos compartilham uma única leitura no banco, evitando o efeito manada quando uma entrada expira no pico                                                                                                                                  |
+| Circuit breakers (Redis, PostgreSQL) | Depois de `CIRCUIT_FAILURE_THRESHOLD` falhas consecutivas o circuito abre e as chamadas falham imediatamente por `CIRCUIT_RESET_TIMEOUT_MS`; depois disso, uma única chamada de teste decide se ele fecha                                                           |
+| Timeouts                             | `CACHE_TIMEOUT_MS` (100 ms) por chamada ao Redis; `DATABASE_TIMEOUT_MS` (2 s) para conexão e consulta                                                                                                                                                               |
+| Port de cache de melhor esforço      | O adapter de cache nunca lança exceção: uma falha do Redis é tratada como miss, então o Redis nunca é uma dependência obrigatória                                                                                                                                   |
+| Readiness                            | PostgreSQL e Redis são reportados como não críticos no `/health/ready` da API (`degraded`, ainda `200`). Todas as réplicas os compartilham, então falhar o readiness tiraria todas as réplicas de uma vez e transformaria uma degradação em indisponibilidade total |
+| Tratamento de erros do pool          | Conexões ociosas encerradas pelo PostgreSQL não derrubam mais o processo (encontrado ao testar a queda do banco, agora coberto por um teste de regressão)                                                                                                           |
 
-The cache is not invalidated by events: the report is already eventually consistent, and keeping the consumer independent of Redis is worth an extra ≤ 5 s of staleness.
+O cache não é invalidado por eventos: o relatório já é eventualmente consistente, e manter o consumidor independente do Redis compensa uma defasagem extra de no máximo 5 s.
 
-## Alternatives considered
+## Alternativas consideradas
 
-| Alternative                       | Why it was not chosen                                                                                                                                       |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Short TTL cache only              | The API would fail together with the database                                                                                                               |
-| Invalidation on every event       | Couples the consumer to Redis and adds a failure mode to consolidation for little freshness gain                                                            |
-| In-process memory cache           | Not shared between replicas; inconsistent answers across replicas                                                                                           |
-| `opossum` circuit breaker library | More complete (rolling windows, events), but the scope needs about 80 lines; an own implementation with an injectable clock is fully deterministic in tests |
-| Timeouts without circuit breakers | Every request would still wait for the timeout during an outage                                                                                             |
-| Distributed lock against stampede | Unnecessary at this volume; per-process single flight is enough                                                                                             |
+| Alternativa                             | Por que não foi escolhida                                                                                                                                                        |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Apenas cache com TTL curto              | A API falharia junto com o banco                                                                                                                                                 |
+| Invalidação a cada evento               | Acopla o consumidor ao Redis e adiciona um modo de falha à consolidação por um ganho pequeno de atualidade                                                                       |
+| Cache em memória do processo            | Não é compartilhado entre réplicas; respostas inconsistentes entre elas                                                                                                          |
+| Biblioteca de circuit breaker `opossum` | Mais completa (janelas deslizantes, eventos), mas o escopo precisa de cerca de 80 linhas; uma implementação própria com relógio injetável é totalmente determinística nos testes |
+| Timeouts sem circuit breakers           | Cada requisição ainda esperaria o timeout durante uma queda                                                                                                                      |
+| Lock distribuído contra efeito manada   | Desnecessário neste volume; o single flight por processo é suficiente                                                                                                            |
 
-## Consequences
+## Consequências
 
-**Positive**
+**Positivas**
 
-- Peak with Redis down for 30 s: 0% failures, p95 22 ms. Peak with the database down for 30 s: 0% failures, p95 8.3 ms, reports served as `STALE`.
-- Responses tell clients where they came from (`x-cache`) and when they were computed (`generatedAt`).
+- Pico com o Redis fora por 30 s: 0% de falhas, p95 de 22 ms. Pico com o banco fora por 30 s: 0% de falhas, p95 de 8,3 ms, relatórios servidos como `STALE`.
+- As respostas informam ao cliente de onde vieram (`x-cache`) e quando foram calculadas (`generatedAt`).
 
-**Negative / trade-offs**
+**Negativas / trade-offs**
 
-- A report never computed before is unavailable while the database is down.
-- Stale data can be served for up to 24 h during a long database outage; this is surfaced by the `StaleBalanceReportsServed` alert.
-- Circuit state is per process, not shared between replicas.
+- Um relatório nunca calculado antes fica indisponível enquanto o banco está fora.
+- Dados obsoletos podem ser servidos por até 24 h durante uma queda longa do banco; isso fica visível pelo alerta `StaleBalanceReportsServed`.
+- O estado do circuito é por processo, não compartilhado entre réplicas.
 
-## Evidence
+## Evidências
 
-- Cache policy: [cached-balance-report.ts](../../services/daily-balance/src/application/services/cached-balance-report.ts)
+- Política de cache: [cached-balance-report.ts](../../services/daily-balance/src/application/services/cached-balance-report.ts)
 - Circuit breaker: [circuit-breaker.ts](../../services/daily-balance/src/adapters/outbound/resilience/circuit-breaker.ts), [circuit-breaking-read-model.ts](../../services/daily-balance/src/adapters/outbound/resilience/circuit-breaking-read-model.ts)
-- Redis adapter: [redis-balance-report-cache.ts](../../services/daily-balance/src/adapters/outbound/redis/redis-balance-report-cache.ts), [redis-connection.ts](../../services/daily-balance/src/adapters/outbound/redis/redis-connection.ts)
+- Adapter do Redis: [redis-balance-report-cache.ts](../../services/daily-balance/src/adapters/outbound/redis/redis-balance-report-cache.ts), [redis-connection.ts](../../services/daily-balance/src/adapters/outbound/redis/redis-connection.ts)
 - Readiness: [health-routes.ts](../../services/daily-balance/src/adapters/inbound/http/routes/health-routes.ts), [main.ts](../../services/daily-balance/src/main.ts)
-- Load tests with outages: [dependency-outage-under-load.mjs](../../tests/resilience/dependency-outage-under-load.mjs)
+- Testes de carga com quedas: [dependency-outage-under-load.mjs](../../tests/resilience/dependency-outage-under-load.mjs)

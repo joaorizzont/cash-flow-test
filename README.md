@@ -43,7 +43,7 @@ flowchart LR
 
 ## Documentação do projeto
 
-A documentação completa de arquitetura fica em [`docs/`](docs/README.md) (em inglês, como o restante do código). Ela atende aos itens obrigatórios e diferenciais do desafio:
+A documentação completa de arquitetura fica em [`docs/`](docs/README.md). Ela atende aos itens obrigatórios e diferenciais do desafio:
 
 | Documento                                                              | Conteúdo                                                                                                               | Item do desafio               |
 | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
@@ -962,7 +962,7 @@ Com uma única réplica de cada serviço, o consolidado atendeu **8 vezes o pico
 
 ## Convenções
 
-- Código, nomes, mensagens de commit e documentação técnica em inglês; o README em português.
+- Código, nomes, mensagens de commit e identificadores em inglês; o README e a documentação de arquitetura em `docs/` em português.
 - Código sem comentários: nomes expressivos, funções pequenas e responsabilidade única tornam a intenção explícita. As decisões ficam registradas na seção de justificativas e nos [ADRs](docs/adr/README.md).
 - Princípios SOLID e Clean Code, reforçados por regras de lint (complexidade ciclomática, número máximo de parâmetros, imports de tipo).
 - Commits seguindo [Conventional Commits](https://www.conventionalcommits.org/).

@@ -1,60 +1,60 @@
-# ADR-0004: PostgreSQL, one database per service
+# ADR-0004: PostgreSQL, um banco por serviço
 
-- **Status:** Accepted
-- **Date:** 2026-10-09
+- **Status:** Aceita
+- **Data:** 2026-10-09
 
-## Context
+## Contexto
 
-The ledger stores money and is the source of truth. It needs atomic writes across several tables (entry, outbox event, idempotency key), constraints that hold under concurrency (positive amounts, a single reversal per entry, point of sale owned by the same merchant), and a queue-like read pattern for the outbox with multiple relay instances. The daily balance needs atomic "add to the current total" updates from concurrent consumers, deduplication of events, and small range reads by merchant and date. Data volumes are modest (tens of events per second) and the access patterns are well known.
+O ledger guarda dinheiro e é a fonte da verdade. Ele precisa de escritas atômicas em várias tabelas (lançamento, evento do outbox, chave de idempotência), de restrições que valham sob concorrência (valores positivos, um único estorno por lançamento, ponto de venda pertencente ao mesmo comerciante) e de um padrão de leitura em fila para o outbox com várias instâncias do relay. O consolidado precisa de atualizações atômicas do tipo "somar ao total atual" vindas de consumidores concorrentes, de deduplicação de eventos e de leituras pequenas por intervalo de comerciante e data. Os volumes são modestos (dezenas de eventos por segundo) e os padrões de acesso são bem conhecidos.
 
-## Decision
+## Decisão
 
-Use **PostgreSQL 17** for both services, with **one database per service** (`ledger` and `daily_balance`), never shared. Access is through `node-postgres` with explicit SQL, transactions propagated with `AsyncLocalStorage`, and migrations written as TypeScript modules applied at startup under a PostgreSQL advisory lock.
+Usar **PostgreSQL 17** nos dois serviços, com **um banco por serviço** (`ledger` e `daily_balance`), nunca compartilhado. O acesso é feito com `node-postgres` e SQL explícito, transações propagadas com `AsyncLocalStorage` e migrations escritas como módulos TypeScript, aplicadas na inicialização sob um advisory lock do PostgreSQL.
 
-Critical rules are enforced by the database as well as by the domain:
+As regras críticas são garantidas pelo banco, além do domínio:
 
-| Rule                                  | Mechanism                                                   |
-| ------------------------------------- | ----------------------------------------------------------- |
-| Amount is positive                    | `CHECK` constraint                                          |
-| An entry is reversed at most once     | Unique partial index on `reversal_of`                       |
-| Point of sale belongs to the merchant | Composite foreign key `(merchant_id, point_of_sale_id)`     |
-| Idempotency                           | Key stored atomically with the response and the entry       |
-| Event processed once                  | Primary key on `event_id`, unique `entry_id` in the journal |
-| Balance always equals the totals      | Generated column `balance_cents`                            |
+| Regra                                       | Mecanismo                                                    |
+| ------------------------------------------- | ------------------------------------------------------------ |
+| Valor positivo                              | Constraint `CHECK`                                           |
+| Um lançamento é estornado no máximo uma vez | Índice único parcial em `reversal_of`                        |
+| Ponto de venda pertence ao comerciante      | Chave estrangeira composta `(merchant_id, point_of_sale_id)` |
+| Idempotência                                | Chave gravada de forma atômica com a resposta e o lançamento |
+| Evento processado uma única vez             | Chave primária em `event_id` e `entry_id` único no diário    |
+| Saldo sempre igual aos totais               | Coluna gerada `balance_cents`                                |
 
-## Alternatives considered
+## Alternativas consideradas
 
-| Need                                        | PostgreSQL                                               | NoSQL option and its limitation                                                                                               |
-| ------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Entry and event written atomically (outbox) | Plain `BEGIN`/`COMMIT` over two tables                   | MongoDB needs a replica set for multi-document transactions; DynamoDB limits items per transaction and pushes towards Streams |
-| Invariants under concurrency                | `CHECK`, unique and foreign key constraints              | Usually enforced only in application code, which races under concurrency                                                      |
-| Several relays reading the outbox           | `FOR UPDATE SKIP LOCKED`                                 | Requires a lease or distributed lock implemented separately                                                                   |
-| Additive balance updates                    | `INSERT ... ON CONFLICT DO UPDATE SET total = total + x` | `$inc` / `ADD` exist, but deduplication in the same transaction is harder                                                     |
-| Period reports and accumulated balance      | Range scan on the primary key, `SUM` before a date       | Possible with careful key design, but less flexible for ad hoc queries                                                        |
+| Necessidade                                  | PostgreSQL                                                         | Opção NoSQL e sua limitação                                                                                                          |
+| -------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Lançamento e evento gravados juntos (outbox) | `BEGIN`/`COMMIT` comum sobre duas tabelas                          | O MongoDB exige replica set para transações multidocumento; o DynamoDB limita os itens por transação e empurra para o uso de Streams |
+| Invariantes sob concorrência                 | Constraints `CHECK`, únicas e de chave estrangeira                 | Normalmente garantidas só no código da aplicação, que sofre com condições de corrida                                                 |
+| Vários relays lendo o outbox                 | `FOR UPDATE SKIP LOCKED`                                           | Exige um lease ou lock distribuído implementado à parte                                                                              |
+| Atualizações aditivas do saldo               | `INSERT ... ON CONFLICT DO UPDATE SET total = total + x`           | `$inc` / `ADD` existem, mas deduplicar na mesma transação é mais difícil                                                             |
+| Relatórios por período e saldo acumulado     | Varredura por intervalo da chave primária, `SUM` antes de uma data | Possível com um desenho de chaves cuidadoso, mas menos flexível para consultas ad hoc                                                |
 
-| Other alternative        | Why it was not chosen                                                                                      |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| A single shared database | Couples the services at the data level: a migration or overload on one side affects the other              |
-| An ORM (Prisma, TypeORM) | Hides exactly the constructs this solution depends on (`SKIP LOCKED`, `ON CONFLICT`, advisory locks)       |
-| External migration tool  | An extra deployment step; TypeScript migrations are compiled into the image and run under an advisory lock |
+| Outra alternativa               | Por que não foi escolhida                                                                                 |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Um único banco compartilhado    | Acopla os serviços no nível dos dados: uma migration ou sobrecarga de um lado afeta o outro               |
+| Um ORM (Prisma, TypeORM)        | Esconde exatamente as construções de que a solução depende (`SKIP LOCKED`, `ON CONFLICT`, advisory locks) |
+| Ferramenta externa de migration | Um passo a mais no deploy; as migrations em TypeScript são compiladas na imagem e rodam sob advisory lock |
 
-NoSQL would be reconsidered for volumes and access patterns that do not fit a single relational node (for example storing raw events at very high scale). In that case the hexagonal structure ([ADR-0003](0003-hexagonal-architecture.md)) confines the change to repository adapters.
+O NoSQL seria reconsiderado para volumes e padrões de acesso que não caibam em um único nó relacional (por exemplo, guardar eventos brutos em escala muito alta). Nesse caso, a estrutura hexagonal ([ADR-0003](0003-hexagonal-architecture.md)) restringe a mudança aos adapters de repositório.
 
-## Consequences
+## Consequências
 
-**Positive**
+**Positivas**
 
-- Invariants hold even under concurrent requests (integration tests: concurrent requests with the same idempotency key store one entry; concurrent reversals produce one success and one conflict; concurrent deliveries of the same event are counted once).
-- Database per service preserves the failure isolation required by [ADR-0002](0002-event-driven-microservices.md).
+- As invariantes valem mesmo com requisições concorrentes (testes de integração: requisições simultâneas com a mesma chave de idempotência gravam um único lançamento; estornos simultâneos produzem um sucesso e um conflito; entregas simultâneas do mesmo evento são contadas uma vez).
+- Um banco por serviço preserva o isolamento de falhas exigido pela [ADR-0002](0002-event-driven-microservices.md).
 
-**Negative / trade-offs**
+**Negativas / trade-offs**
 
-- Vertical scaling limits for writes on a single primary; addressed later with read replicas and partitioning if needed (see [future evolutions](../08-future-evolutions.md)).
-- An idle connection terminated by the server makes `pg` emit an `error` event on the pool, which crashes Node if unhandled. Every pool now handles it (found during resilience testing, covered by a regression test).
+- Limites de escala vertical para escritas em um único primário; tratados depois com réplicas de leitura e particionamento, se necessário (veja as [evoluções futuras](../08-future-evolutions.md)).
+- Uma conexão ociosa encerrada pelo servidor faz o `pg` emitir um evento `error` no pool, o que derruba o Node se não for tratado. Todos os pools agora tratam esse evento (problema encontrado nos testes de resiliência e coberto por um teste de regressão).
 
-## Evidence
+## Evidências
 
-- Ledger schema: [0001-create-points-of-sale-and-entries.ts](../../services/ledger/src/adapters/outbound/postgres/migrations/0001-create-points-of-sale-and-entries.ts)
-- Daily balance schema: [0001-create-daily-balances.ts](../../services/daily-balance/src/adapters/outbound/postgres/migrations/0001-create-daily-balances.ts), [0002-create-applied-movements.ts](../../services/daily-balance/src/adapters/outbound/postgres/migrations/0002-create-applied-movements.ts)
-- Transactions and pool error handling: [postgres-database.ts](../../services/ledger/src/adapters/outbound/postgres/postgres-database.ts)
-- Migrations under advisory lock: [postgres-migrator.ts](../../services/ledger/src/adapters/outbound/postgres/postgres-migrator.ts)
+- Schema do ledger: [0001-create-points-of-sale-and-entries.ts](../../services/ledger/src/adapters/outbound/postgres/migrations/0001-create-points-of-sale-and-entries.ts)
+- Schema do consolidado: [0001-create-daily-balances.ts](../../services/daily-balance/src/adapters/outbound/postgres/migrations/0001-create-daily-balances.ts), [0002-create-applied-movements.ts](../../services/daily-balance/src/adapters/outbound/postgres/migrations/0002-create-applied-movements.ts)
+- Transações e tratamento de erros do pool: [postgres-database.ts](../../services/ledger/src/adapters/outbound/postgres/postgres-database.ts)
+- Migrations sob advisory lock: [postgres-migrator.ts](../../services/ledger/src/adapters/outbound/postgres/postgres-migrator.ts)
