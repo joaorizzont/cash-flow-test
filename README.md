@@ -43,18 +43,19 @@ O requisito não funcional mais forte do desafio é que _o serviço de lançamen
 
 ### Padrões arquiteturais
 
-| Padrão                                                   | Problema que resolve                                                                                                                                                                                                             |
-| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Comunicação assíncrona por eventos                       | O ledger não conhece nem espera o consolidado. Se o consolidado cair, os eventos ficam na fila e são processados quando ele voltar                                                                                               |
-| Transactional Outbox                                     | Evita a escrita dupla (banco + broker). O lançamento e o evento são gravados na mesma transação; um relay publica depois. Nem o RabbitMQ fica no caminho crítico do registro                                                     |
-| CQRS com modelo de leitura materializado                 | O saldo diário é atualizado a cada evento, não calculado na consulta. A leitura vira uma busca por chave primária com cache, o que torna 50 req/s trivial e mantém a perda de requisições bem abaixo dos 5% tolerados            |
-| Consumidor idempotente                                   | A entrega é _at-least-once_. A deduplicação por `event_id` na mesma transação da atualização garante que um evento repetido não altere o saldo duas vezes                                                                        |
-| CloudEvents como envelope dos eventos                    | Especificação aberta (CNCF) para metadados de eventos: `id`, `source`, `type`, `time` e `subject` têm significado padronizado e são entendidos por ferramentas de mercado                                                        | Formato próprio, que exigiria documentar e manter cada campo de metadado                                              |
-| Pacote de contratos compartilhado (_published language_) | O ledger publica e o consolidado consome o mesmo schema TypeBox, versionado no nome do tipo (`.v1`). O pacote contém apenas schemas e validação, sem lógica de negócio, então não acopla os serviços                             | Schema registry (ex.: Confluent, Apicurio), mais adequado quando há muitos times e serviços; registrado como evolução |
-| Relay como processo separado                             | A API e o relay usam a mesma imagem, com comandos diferentes. Escalam e falham de forma independente: se o relay cair, a API continua registrando e o backlog fica no outbox                                                     | Relay como tarefa em background dentro da API, que compartilharia recursos e ciclo de vida                            |
-| Exchange `topic` com publicação `mandatory`              | O roteamento por padrão (`cashflow.ledger.entry.*.v1`) permite novos consumidores sem alterar o produtor; o `mandatory` garante que nenhum evento seja descartado silenciosamente por falta de fila                              | Alternate exchange, que preservaria a mensagem em uma fila de estacionamento, mas exigiria reprocessamento manual     |
-| Arquitetura hexagonal (Ports and Adapters)               | Regras de negócio isoladas de framework, banco e mensageria. Casos de uso dependem apenas de interfaces (ports), o que permite testar o domínio sem infraestrutura e trocar adapters (ex.: RabbitMQ por SQS) sem tocar no núcleo |
-| DDD tático                                               | Value objects garantem que nenhum dado inválido exista no domínio (`Money`, `BusinessDate`, `TimeZone`); o agregado `Entry` concentra as regras de estorno e emite os eventos de domínio                                         |
+| Padrão                                                   | Problema que resolve                                                                                                                                                                                                                                                      |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Comunicação assíncrona por eventos                       | O ledger não conhece nem espera o consolidado. Se o consolidado cair, os eventos ficam na fila e são processados quando ele voltar                                                                                                                                        |
+| Transactional Outbox                                     | Evita a escrita dupla (banco + broker). O lançamento e o evento são gravados na mesma transação; um relay publica depois. Nem o RabbitMQ fica no caminho crítico do registro                                                                                              |
+| CQRS com modelo de leitura materializado                 | O saldo diário é atualizado a cada evento, não calculado na consulta. A leitura vira uma busca por chave primária com cache, o que torna 50 req/s trivial e mantém a perda de requisições bem abaixo dos 5% tolerados                                                     |
+| Consumidor idempotente                                   | A entrega é _at-least-once_. A deduplicação por `event_id` na mesma transação da atualização garante que um evento repetido não altere o saldo duas vezes                                                                                                                 |
+| CloudEvents como envelope dos eventos                    | Especificação aberta (CNCF) para metadados de eventos: `id`, `source`, `type`, `time` e `subject` têm significado padronizado e são entendidos por ferramentas de mercado                                                                                                 | Formato próprio, que exigiria documentar e manter cada campo de metadado                                              |
+| Pacote de contratos compartilhado (_published language_) | O ledger publica e o consolidado consome o mesmo schema TypeBox, versionado no nome do tipo (`.v1`). O pacote contém apenas schemas e validação, sem lógica de negócio, então não acopla os serviços                                                                      | Schema registry (ex.: Confluent, Apicurio), mais adequado quando há muitos times e serviços; registrado como evolução |
+| Relay como processo separado                             | A API e o relay usam a mesma imagem, com comandos diferentes. Escalam e falham de forma independente: se o relay cair, a API continua registrando e o backlog fica no outbox                                                                                              | Relay como tarefa em background dentro da API, que compartilharia recursos e ciclo de vida                            |
+| Relay por polling com `FOR UPDATE SKIP LOCKED`           | Um worker consulta o outbox a cada 500 ms (ou imediatamente enquanto houver backlog). O `SKIP LOCKED` permite várias réplicas sem publicação duplicada, sem precisar de lock distribuído. Detalhes em [Como o relay do outbox funciona](#como-o-relay-do-outbox-funciona) | `LISTEN/NOTIFY` ou CDC com Debezium, com menor latência porém mais complexidade; registrados como evolução            |
+| Exchange `topic` com publicação `mandatory`              | O roteamento por padrão (`cashflow.ledger.entry.*.v1`) permite novos consumidores sem alterar o produtor; o `mandatory` garante que nenhum evento seja descartado silenciosamente por falta de fila                                                                       | Alternate exchange, que preservaria a mensagem em uma fila de estacionamento, mas exigiria reprocessamento manual     |
+| Arquitetura hexagonal (Ports and Adapters)               | Regras de negócio isoladas de framework, banco e mensageria. Casos de uso dependem apenas de interfaces (ports), o que permite testar o domínio sem infraestrutura e trocar adapters (ex.: RabbitMQ por SQS) sem tocar no núcleo                                          |
+| DDD tático                                               | Value objects garantem que nenhum dado inválido exista no domínio (`Money`, `BusinessDate`, `TimeZone`); o agregado `Entry` concentra as regras de estorno e emite os eventos de domínio                                                                                  |
 
 ### Tecnologias
 
@@ -329,6 +330,46 @@ Exemplo de mensagem ([CloudEvents 1.0](https://cloudevents.io), `content-type: a
   }
 }
 ```
+
+### Como o relay do outbox funciona
+
+O `ledger-outbox-relay` é um processo à parte (mesma imagem do ledger, comando `node dist/relay.js`) que roda um worker em loop. Cada ciclo:
+
+1. Abre uma transação no PostgreSQL.
+2. Seleciona até `OUTBOX_BATCH_SIZE` (padrão 100) eventos pendentes e já liberados para tentativa, travando as linhas com `FOR UPDATE SKIP LOCKED`.
+3. Publica os eventos em paralelo no RabbitMQ e aguarda a confirmação do broker (_publisher confirms_) de cada um.
+4. Marca os confirmados como publicados (`published_at`) e agenda nova tentativa, com backoff, para os rejeitados.
+5. Faz o commit. Se houver falha de infraestrutura (banco ou broker indisponível), a transação inteira é desfeita e os eventos continuam pendentes.
+
+Ritmo do loop:
+
+| Situação                                  | Próximo ciclo                                                                   |
+| ----------------------------------------- | ------------------------------------------------------------------------------- |
+| O ciclo publicou eventos                  | Imediatamente, para drenar o backlog rapidamente                                |
+| Não havia eventos pendentes               | Após `OUTBOX_POLL_INTERVAL_MS` (padrão 500 ms)                                  |
+| Falha de infraestrutura (banco ou broker) | Backoff exponencial: 1 s, 2 s, 4 s... até `OUTBOX_MAX_BACKOFF_MS` (padrão 30 s) |
+
+Em operação normal, a defasagem entre o registro do lançamento e a publicação do evento é de no máximo cerca de meio segundo.
+
+**Várias instâncias.** O Docker Compose sobe uma réplica, que atende com folga o volume esperado. Graças ao `SKIP LOCKED`, cada relay ignora as linhas já travadas por outro, então é possível escalar sem publicar o mesmo evento duas vezes; uma segunda réplica serve para alta disponibilidade:
+
+```bash
+docker compose up -d --scale ledger-outbox-relay=3
+```
+
+Um teste de integração comprova esse comportamento: três relays concorrentes publicam 40 eventos e cada evento sai exatamente uma vez.
+
+**Custos do polling.** Quando ocioso, o relay faz uma consulta a cada 500 ms, barata porque usa um índice parcial (`outbox_pending_idx`) que contém apenas eventos pendentes. A latência adicional é de até 500 ms, irrelevante para um consolidado diário.
+
+**Evoluções possíveis:**
+
+| Alternativa                       | Ganho                                                                 | Custo                                                                  |
+| --------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `LISTEN/NOTIFY` do PostgreSQL     | O relay acorda assim que um evento é gravado, sem esperar o intervalo | Uma conexão dedicada a mais; o polling continua como rede de segurança |
+| CDC com Debezium (leitura do WAL) | Latência de milissegundos e nenhum polling                            | Mais infraestrutura para operar (Kafka Connect ou Debezium Server)     |
+| Limpeza periódica do outbox       | Mantém a tabela pequena                                               | Um job adicional para remover eventos publicados há mais de N dias     |
+
+O polling foi escolhido por ser o mais simples de operar e de testar, e por atender o requisito com folga.
 
 ### Garantias de entrega
 
